@@ -59,8 +59,12 @@ In Business Settings, assign to the system user:
 
 The system user must already be a business member before assignment succeeds.
 
-Give me: the ad account IDs (`act_XXXXXXXXX`) and Page IDs. `preflight` will discover and
-list them, so you can also just give me the token and let it enumerate.
+`preflight` discovers these itself from the token, so you do not need to send me IDs —
+but it also means an unassigned asset is invisible rather than merely unavailable.
+
+**Granting the scope is not the same as granting the asset.** A system user can hold
+`ads_management` and be assigned to zero ad accounts. Meta gives no warning; it surfaces
+much later as a `#200` at publish time with a message that never mentions assignment.
 
 ### 4. Funding, confirmed
 

@@ -7,7 +7,6 @@ export interface Config {
   appId: string;
   appSecret: string;
   systemUserToken: string;
-  businessId: string;
   mode: RuntimeMode;
 }
 
@@ -39,7 +38,6 @@ export function loadConfig(): Config {
   const appId = req('META_APP_ID');
   const appSecret = req('META_APP_SECRET');
   const systemUserToken = req('META_SYSTEM_USER_TOKEN');
-  const businessId = req('META_BUSINESS_ID');
 
   if (missing.length > 0) {
     throw new ConfigError(
@@ -53,5 +51,5 @@ export function loadConfig(): Config {
     throw new ConfigError(`RUNTIME_MODE must be one of ${MODES.join(' | ')}, got "${raw}"`);
   }
 
-  return { appId, appSecret, systemUserToken, businessId, mode: raw as RuntimeMode };
+  return { appId, appSecret, systemUserToken, mode: raw as RuntimeMode };
 }
