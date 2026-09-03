@@ -1,0 +1,66 @@
+# One file per brand. Copy this, rename it, and delete the ones you do not need.
+#
+# Everything here is either legally load-bearing or economically load-bearing.
+# Nothing in this file can be inferred safely, which is why it is the one part of the
+# system a human still owns.
+
+id: example-brand              # lowercase slug; appears in Meta object names — never change it
+name: Example Brand
+pageId: "000000000000000"
+adAccountId: act_000000000000000
+# instagramUserId: "000000000000000"   # omit to fall back to a Page-Backed Instagram Account
+
+# One of: website_purchase, website_lead, instant_form_lead, messenger_lead,
+#         whatsapp_conversation, phone_call, catalog_sales, traffic, app_install
+#
+# instant_form_lead is the only one that needs no domain verification, no pixel and no
+# AEM configuration — the fastest path to a first live ad.
+archetype: instant_form_lead
+
+destination:
+  leadFormId: "000000000000000"
+  # For website archetypes instead:
+  # url: https://example.com/offer
+  # pixelId: "000000000000000"
+  # customEventType: PURCHASE
+
+spend:
+  dailyBudgetMinor: 2000        # minor units — 2000 = $20.00. Zero-decimal currencies differ.
+  maxDailyBudgetMinor: 10000    # hard ceiling; the optimiser may never propose above this
+  targetCpaMinor: 4000
+  # targetRoas: 2.5
+  # contributionMarginMinor: 1500
+  #   Margin per conversion. Sent as the CAPI event value, it makes Meta optimise your
+  #   profit rather than its revenue — the one thing Meta structurally will not do for you.
+
+claims:
+  # The generator may assert NOTHING outside this list. Left to itself a language model
+  # will write "clinically proven"; you are the only party who knows what is true.
+  substantiated:
+    - "Free 30-minute consultation"
+    - "Over 400 students enrolled since 2019"
+  neverSay:
+    - guaranteed
+    - clinically proven
+    - "#1"
+    - risk-free
+  neverShow:
+    - competitor logos
+    - children unaccompanied
+  # Set true only if you hold rights to any spokesperson likeness or voice used.
+  # While false, the pipeline refuses to generate a human presenter.
+  likenessRightsConfirmed: false
+
+# Required on every campaign. ["NONE"] for ordinary commercial advertising.
+# HOUSING / EMPLOYMENT / CREDIT / FINANCIAL_PRODUCTS_SERVICES silently rewrite targeting:
+# age forced to 18-65+, no gender selection, no location exclusion, 15-mile minimum
+# radius, no lookalikes.
+specialAdCategories:
+  - NONE
+
+countries:
+  - IN
+
+proposition: >
+  What this brand actually sells, in plain language. Grounding for the generator —
+  the more concrete and specific, the less the model invents.
