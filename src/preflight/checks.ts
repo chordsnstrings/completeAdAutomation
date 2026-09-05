@@ -73,7 +73,7 @@ export async function checkToken(
   client: MetaClient,
   appId: string,
   token: string,
-): Promise<{ results: CheckResult[]; ok: boolean }> {
+): Promise<{ results: CheckResult[]; ok: boolean; systemUserId?: string }> {
   const results: CheckResult[] = [];
   let data: DebugTokenData;
 
@@ -187,7 +187,7 @@ export async function checkToken(
     return { ok: false, results };
   }
 
-  return { ok: true, results };
+  return { ok: true, results, ...(data.user_id ? { systemUserId: data.user_id } : {}) };
 }
 
 /**
@@ -197,7 +197,12 @@ export async function checkToken(
  */
 export async function checkAssignedAssets(
   client: MetaClient,
+  systemUserId?: string,
 ): Promise<{ results: CheckResult[]; adAccountIds: string[] }> {
+  // The owning business is not discoverable from a system user token — /me/businesses
+  // returns empty and the app node exposes no business field — so the remedy names the
+  // system user id instead, which is what identifies the row in Business Settings.
+  const who = systemUserId ? `system user ${systemUserId} ("Admin")` : 'the system user';
   const results: CheckResult[] = [];
 
   let adAccounts: Array<{ id: string; name?: string }> = [];
@@ -228,7 +233,7 @@ export async function checkAssignedAssets(
           severity: 'BLOCK',
           detail: 'the token holds ads_management but is assigned to ZERO ad accounts',
           remedy:
-            'Business Settings > Users > System Users > select the user > Assign Assets > Ad Accounts, ' +
+            `Business Settings > Users > System Users > ${who} > Add Assets > Ad Accounts, ` +
             'with the "Manage campaigns" permission. Granting the scope is not the same as granting the asset.',
         },
   );
@@ -256,8 +261,8 @@ export async function checkAssignedAssets(
           severity: 'BLOCK',
           detail: 'no Pages assigned to this system user',
           remedy:
-            'Business Settings > Assign Assets > Pages. Every ad creative requires ' +
-            'object_story_spec.page_id, so no Page means no ad.',
+            `Business Settings > Users > System Users > ${who} > Add Assets > Pages, with the ` +
+            '"Manage Page" or ads task. Every ad creative requires object_story_spec.page_id, so no Page means no ad.',
         },
   );
 

@@ -59,7 +59,7 @@ export async function runPreflight(): Promise<number> {
   section('Token', token.results);
   if (!token.ok) return summarise();
 
-  const assets = await checkAssignedAssets(client);
+  const assets = await checkAssignedAssets(client, token.systemUserId);
   section('Asset assignments', assets.results);
 
   for (const id of assets.adAccountIds) {
