@@ -284,37 +284,86 @@ export async function run(): Promise<VerifyReport> {
     return `all ${ALL_ARCHETYPES.length} archetypes produced campaign+adset+ad (+creative except catalog_sales)`;
   });
 
-  await check('the on-Meta destination archetypes fail only for want of a click URL', () => {
-    // Isolates the cause of the failure above: give the same request an explicit https
-    // link and everything builds, which proves the gap is the link contract and not the
-    // objective/promoted_object/targeting machinery.
-    const onMeta: ConversionArchetype[] = ['messenger_lead', 'whatsapp_conversation', 'phone_call'];
-    const recovered: string[] = [];
-    for (const archetype of onMeta) {
+  await check('the on-Meta destination archetypes need no website URL, and name their surface', () => {
+    // REWRITTEN. This check previously asserted the OPPOSITE — that messenger_lead,
+    // whatsapp_conversation and phone_call MUST fail from a bare Brand — because it existed
+    // only to isolate the cause of the archetype-matrix failure above. That defect is fixed
+    // (the destination of an on-Meta ad is a Meta surface declared on the ad set, not a
+    // URL an operator has to invent), so the old assertion now demands the bug back. What
+    // replaces it is strictly stronger: the bare build must SUCCEED, and every object it
+    // produces must actually name the surface it claims to send people to.
+    const surface: Partial<Record<ConversionArchetype, string>> = {
+      messenger_lead: 'LEAD_FROM_MESSENGER',
+      whatsapp_conversation: 'WHATSAPP',
+      phone_call: 'PHONE_CALL',
+    };
+    const expectedCtaValue: Partial<Record<ConversionArchetype, Record<string, string>>> = {
+      messenger_lead: { app_destination: 'MESSENGER' },
+      whatsapp_conversation: { app_destination: 'WHATSAPP' },
+      // brand.ts REQUIRES destination.phoneNumber for phone_call; it has to reach the wire.
+      phone_call: { link: 'tel:+15551234567' },
+    };
+
+    for (const archetype of ['messenger_lead', 'whatsapp_conversation', 'phone_call'] as const) {
       const bare = buildTree(makeRequest(archetype));
       must(
-        bare.errors.campaign !== undefined,
-        `${archetype}: expected the bare config to fail, it built`,
+        Object.keys(bare.errors).length === 0,
+        `${archetype}: a Brand domain/brand.ts accepts must publish unchanged, but ` +
+          `${JSON.stringify(Object.entries(bare.errors).map(([k, v]) => `${k}: ${v.message.slice(0, 120)}`))}`,
       );
+      const creative = bare.built.creative;
+      must(creative !== undefined, `${archetype}: no creative`);
+      const oss = JSON.parse(creative.params['object_story_spec'] ?? 'null') as Record<string, unknown>;
+      const vd = oss['video_data'] as Record<string, unknown>;
+      must(!('link' in vd), `${archetype}: video_data has no link field; the destination lives in the CTA value`);
+      const cta = vd['call_to_action'] as { type: string; value: Record<string, string> };
+      eq(cta.value, expectedCtaValue[archetype], `${archetype}: call_to_action.value`);
+      must(
+        !('url_tags' in creative.params),
+        `${archetype}: url_tags were appended to an on-Meta destination, which has no query string to carry ` +
+          `them and no analytics to read them back`,
+      );
+      // The ad set must agree with the creative about where the click goes.
+      eq(bare.built.adset?.params['destination_type'], surface[archetype], `${archetype}: destination_type`);
+      eq(
+        JSON.parse(bare.built.adset?.params['promoted_object'] ?? 'null'),
+        { page_id: '102938475610293' },
+        `${archetype}: promoted_object`,
+      );
+      // The recipe is genuinely undocumented; it must be surfaced, not silently trusted.
+      const warnings = validatePublishRequest(makeRequest(archetype));
+      must(
+        warnings.some((w) => w.includes('UNVERIFIED') && w.includes('click-to-message')),
+        `${archetype}: the click-to-message/click-to-call recipe is UNVERIFIED in the corpus and must warn: ` +
+          JSON.stringify(warnings),
+      );
+      // An explicit https link is still honoured for a caller who knows the surface's URL.
       const req = makeRequest(archetype);
       const withLink = buildTree({ ...req, creative: { ...req.creative, link: 'https://m.me/102938475610293' } });
       must(
         Object.keys(withLink.errors).length === 0,
-        `${archetype}: still failed with an explicit link: ${JSON.stringify(withLink.errors)}`,
+        `${archetype}: failed with an explicit link: ${JSON.stringify(withLink.errors)}`,
       );
-      recovered.push(archetype);
     }
-    // The phone_call archetype is the sharp case: brand.ts REQUIRES destination.phoneNumber
-    // for it, and publish.ts never reads that field at all.
+
+    // A phone number is dialled, not clicked: it is declared once on the brand where it can
+    // be validated, rather than hand-written as a URI into a field that refuses one.
     const telReq = makeRequest('phone_call');
     refuses(
       () => buildCreativeRequest({ ...telReq, creative: { ...telReq.creative, link: 'tel:+15551234567' } }),
       'call_to_action.value.link',
       'must be http or https',
     );
+    const localFormat = resolveAdConfig(makeBrand('phone_call', { destination: { phoneNumber: '(555) 123-4567' } }));
+    refuses(
+      () => buildCreativeRequest({ ...telReq, config: localFormat }),
+      'object_story_spec.video_data.call_to_action.value.link',
+      'E.164',
+    );
     return (
-      `${recovered.join(', ')} build once creative.link is supplied by hand; phone_call's own ` +
-      `destination.phoneNumber is never read by publish.ts and a tel: URL is refused`
+      'messenger_lead, whatsapp_conversation and phone_call all publish from the bare Brand; the CTA value ' +
+      'carries app_destination / tel: and no url_tags, the ad set agrees on destination_type, a non-E.164 ' +
+      'number is refused, and the undocumented recipe warns UNVERIFIED'
     );
   });
 
@@ -500,7 +549,23 @@ export async function run(): Promise<VerifyReport> {
       );
     }
     must(onAdSet, 'bid_amount reached neither node');
-    return `bid_amount is on the ad set (campaign=${onCampaign})`;
+    // Not on both, either: a value repeated across two nodes is the other half of the same
+    // code 100, and "it is on the ad set" alone would not have caught it.
+    must(!onCampaign, `bid_amount is on the campaign AND the ad set; §3's campaign field table has no such field`);
+    eq(adset['bid_amount'], '500', 'bid_amount on the ad set, in minor units');
+    eq(campaign['bid_strategy'], 'COST_CAP', 'bid_strategy still follows the budget to the campaign under CBO');
+
+    // And under ad-set budgets the pair travels together, still exactly once.
+    const abo: PublishRequest = {
+      ...makeRequest('website_purchase'),
+      options: { budgetLevel: 'adset', adSetBudgetSharing: false, bidStrategy: 'COST_CAP', bidAmountMinor: 500 },
+    };
+    const aboCampaign = buildCampaignRequest(abo).params;
+    const aboAdSet = buildAdSetRequest(abo, { campaignId: '1' }).params;
+    must(!('bid_amount' in aboCampaign), 'ABO: bid_amount must not appear on the campaign');
+    eq(aboAdSet['bid_amount'], '500', 'ABO: bid_amount on the ad set');
+    eq(aboAdSet['bid_strategy'], 'COST_CAP', 'ABO: bid_strategy moves down with the budget');
+    return 'bid_amount is on the ad set under BOTH budget levels and never on the campaign; bid_strategy follows the budget';
   });
 
   await check('adset: attribution, schedule and DSA land on the ad set body', () => {

@@ -6,12 +6,24 @@
  *
  * Two things shape every decision here.
  *
- *  1. **Meta runs two independent limiters and either can stop you.** The BUC buckets are
- *     per (business object, use case) and reported as three percentages; the ad-account
- *     point score is per ad account and costs 1 for a read and 3 for a write against a
- *     ceiling of 60 on the Limited tier. Sixty points over a 300 s decay window is
- *     **twenty writes per five minutes per ad account** — four a minute. That number, not
- *     the BUC hourly quota, is what actually throttles publishing.
+ *  1. **Meta runs four independent limiters and any of them can stop you.** The BUC
+ *     buckets are per (business object, use case) and reported as three percentages; the
+ *     ad-account point score is per ad account and costs 1 for a read and 3 for a write
+ *     against a ceiling of 60 on the Limited tier and 9000 on Full. Sixty points over a
+ *     300 s decay window is **twenty writes per five minutes per ad account** — four a
+ *     minute. That number, not the BUC hourly quota, is what actually throttles
+ *     publishing, and reading the tier off the header is what tells the two ceilings
+ *     apart. On top of those two sit the Insights limiter
+ *     (`x-fb-ads-insights-throttle`), which gates reporting traffic separately from the
+ *     `ads_insights` BUC bucket, and the platform limiter (`x-app-usage`), an app-wide
+ *     pool shared by every ad account and every tenant.
+ *
+ *     **Blast radius is what decides where each one lives.** The point score and the BUC
+ *     buckets are per account, so they live in `AccountState`. The platform pool and the
+ *     insights `app_id_util_pct` are app-wide, so they live on the scheduler: one
+ *     observation on one brand's response must stand every brand down, or each tenant
+ *     rediscovers the same exhaustion by being refused by Meta while the rest keep
+ *     draining the pool.
  *
  *  2. **Nothing in here sleeps.** Every refusal is a thrown `RateLimited` carrying
  *     `retryAfterMs`. A durable workflow can then sleep on a timer that survives a process
@@ -34,7 +46,7 @@
  */
 
 import { MetaApiError } from './errors.ts';
-import { isFullTier, shouldCircuitBreak, type RateLimitState } from './rateLimit.ts';
+import { observedAccessTiers, shouldCircuitBreak, type RateLimitState } from './rateLimit.ts';
 
 /** Epoch milliseconds. Injected so tests are deterministic and never sleep. */
 export type Clock = () => number;
@@ -76,6 +88,37 @@ const GOVERNOR = {
   CRIT_PCT: 95,
   CRIT_MS: 600_000,
 } as const;
+
+/**
+ * The Insights API's own limiter, reported in `x-fb-ads-insights-throttle` and completely
+ * separate from the `ads_insights` BUC bucket: Meta refuses insights calls on this gate
+ * while the BUC percentages still look comfortable, so a scheduler that watches only BUC
+ * issues calls into a closed door.
+ *
+ * Thresholds from `docs/research/meta-insights-measurement.md` §11.3: *"treat
+ * `app_id_util_pct` or `acc_id_util_pct` >= 90 as a stop signal and sleep to the next
+ * window"*, and Meta's own guidance to *"implement back-off at ~100% utility"* is called
+ * out there as already too late, because throttling is in effect before 100 is reported.
+ * Hence 90 -> stand off, 100 -> stand off hard. The header carries no cut-off interval of
+ * its own, so the intervals are the governor's.
+ */
+const INSIGHTS_GOVERNOR = {
+  WARN_PCT: 90,
+  WARN_MS: 120_000,
+  CRIT_PCT: 100,
+  CRIT_MS: 600_000,
+} as const;
+
+/**
+ * The platform limiter, `x-app-usage`: 200 calls/hour x daily active users, pooled
+ * app-wide, throttling at 100 on any of `call_count`, `total_time`, `total_cputime`.
+ *
+ * Same shape and same semantics as the BUC percentages, so the same thresholds apply —
+ * but the blast radius is not the same. This pool is shared by every ad account and every
+ * tenant on the app, which is why it is held once per scheduler rather than per account:
+ * exhausting it stops publishing for every brand simultaneously.
+ */
+const APP_GOVERNOR = GOVERNOR;
 
 /**
  * The complete `type` enum for `x-business-use-case-usage`. Unknown values are still
@@ -174,6 +217,15 @@ export interface AccountSnapshot {
   pointsBlockedForMs: number;
   inFlightWrites: number;
   buc: Array<{ useCase: string; worstPct: number; blockedForMs: number }>;
+  /** Insights limiter, account component (`acc_id_util_pct`). Gates `ads_insights` only. */
+  insightsBlockedForMs: number;
+  insightsPct: number;
+  /** Insights limiter, app component (`app_id_util_pct`) — shared by every account. */
+  insightsAppBlockedForMs: number;
+  insightsAppPct: number;
+  /** Platform limiter (`x-app-usage`) — app-wide, and it gates BOTH lanes everywhere. */
+  appBlockedForMs: number;
+  appUsagePct: number;
   /** Coarse cross-bucket breaker from `rateLimit.ts`, kept for observability only. */
   breakerReason: string | undefined;
 }
@@ -196,6 +248,21 @@ interface BucGate {
   detail: string;
 }
 
+/**
+ * A stand-off imposed by a percentage-only header — one that reports how close to the
+ * limit you are but never says for how long you are cut off. Same shape as `BucGate`;
+ * kept separate because these are not keyed by use case.
+ */
+interface Gate {
+  pct: number;
+  blockedUntil: number;
+  detail: string;
+}
+
+function newGate(): Gate {
+  return { pct: 0, blockedUntil: 0, detail: '' };
+}
+
 interface AccountState {
   tokens: number;
   capacity: number;
@@ -205,6 +272,8 @@ interface AccountState {
   pointsBlockedUntil: number;
   pointsBlockReason: string;
   buc: Map<string, BucGate>;
+  /** `acc_id_util_pct` from `x-fb-ads-insights-throttle`. Gates `ads_insights` calls. */
+  insights: Gate;
   breakerReason: string | undefined;
   /** Entrants to the per-account write lock that have not yet released. */
   writeDepth: number;
@@ -216,6 +285,16 @@ export class MetaScheduler {
   private readonly writeReserveFraction: number;
   private readonly onThrottle: ((r: RateLimited) => void) | undefined;
   private readonly accounts = new Map<string, AccountState>();
+
+  /**
+   * The two APP-WIDE limiters. They are deliberately NOT in `AccountState`: both pools are
+   * shared by every ad account and every tenant this process talks to, so holding them per
+   * account would mean each brand had to discover the same exhaustion for itself, one
+   * throttled response at a time, while the other brands kept spending the pool. One
+   * observation on any account must stand every account down.
+   */
+  private readonly insightsAppGate: Gate = newGate();
+  private readonly appUsageGate: Gate = newGate();
 
   constructor(opts: SchedulerOptions) {
     this.now = opts.now;
@@ -318,6 +397,53 @@ export class MetaScheduler {
       }
     }
 
+    // The Insights limiter. This is NOT the `ads_insights` BUC bucket: it is a second,
+    // separately metered gate on the same calls, and at 100% Meta is already refusing
+    // insights requests while the BUC percentages still read comfortable. Its two
+    // percentages have two different blast radii — `acc_id_util_pct` is this account,
+    // `app_id_util_pct` is every account on the app — so they are held apart.
+    const ins = state.insights;
+    if (ins) {
+      const accPct = clamp(ins.accIdUtilPct, 0, 100);
+      const appPct = clamp(ins.appIdUtilPct, 0, 100);
+      this.raise(
+        st.insights,
+        now,
+        governed(accPct, INSIGHTS_GOVERNOR),
+        accPct,
+        `insights limiter: acc_id_util_pct ${accPct}% on ${adAccountId} ` +
+          `(x-fb-ads-insights-throttle; the ads_insights BUC bucket is a different gate)`,
+      );
+      this.raise(
+        this.insightsAppGate,
+        now,
+        governed(appPct, INSIGHTS_GOVERNOR),
+        appPct,
+        `insights limiter: app_id_util_pct ${appPct}% app-wide ` +
+          `(x-fb-ads-insights-throttle; every ad account on this app shares it)`,
+      );
+    }
+
+    // The platform limiter. App-wide across every tenant, and it gates BOTH lanes: unlike
+    // the BUC split there is no separate publishing pool to fall back on.
+    const app = state.app;
+    if (app) {
+      const worst = Math.max(
+        clamp(app.callCount, 0, 100),
+        clamp(app.totalCputime, 0, 100),
+        clamp(app.totalTime, 0, 100),
+      );
+      this.raise(
+        this.appUsageGate,
+        now,
+        governed(worst, APP_GOVERNOR),
+        worst,
+        `app-wide platform limiter at ${worst}% (x-app-usage call_count ${app.callCount}, ` +
+          `total_cputime ${app.totalCputime}, total_time ${app.totalTime}); the pool is ` +
+          `200 calls/hour x daily active users shared by every ad account on this app`,
+      );
+    }
+
     // Kept for operators only. The breaker aggregates across every use case and returns
     // no interval, so gating on it would let an insights bucket at 96% stop publishing —
     // exactly the starvation the lane split exists to prevent.
@@ -403,6 +529,12 @@ export class MetaScheduler {
         worstPct: g.worstPct,
         blockedForMs: Math.max(0, g.blockedUntil - now),
       })),
+      insightsBlockedForMs: Math.max(0, st.insights.blockedUntil - now),
+      insightsPct: st.insights.pct,
+      insightsAppBlockedForMs: Math.max(0, this.insightsAppGate.blockedUntil - now),
+      insightsAppPct: this.insightsAppGate.pct,
+      appBlockedForMs: Math.max(0, this.appUsageGate.blockedUntil - now),
+      appUsagePct: this.appUsageGate.pct,
       breakerReason: st.breakerReason,
     };
   }
@@ -484,10 +616,38 @@ export class MetaScheduler {
     const bucScope = `${req.adAccountId}/${useCase}`;
     const pointScope = `${req.adAccountId}/points`;
 
+    // Widest blast radius first, so the refusal an operator sees names the limiter that
+    // is actually holding the whole app down rather than a per-account symptom of it.
+    if (this.appUsageGate.blockedUntil > now) {
+      return {
+        allowed: false,
+        retryAfterMs: this.appUsageGate.blockedUntil - now,
+        reason: this.appUsageGate.detail,
+        scope: 'app/platform',
+      };
+    }
+
     const gate = st.buc.get(useCase);
     if (gate && gate.blockedUntil > now) {
       return { allowed: false, retryAfterMs: gate.blockedUntil - now, reason: gate.detail, scope: bucScope };
     }
+
+    // The Insights limiter gates insights traffic ONLY. An object read (a GET of
+    // campaigns/ad sets/ads) draws on `ads_management` and must not be stopped because
+    // reporting is throttled — that is the same starvation the lane split prevents, in
+    // the other direction.
+    if (useCase === 'ads_insights') {
+      const blocked = longestBlock([st.insights, this.insightsAppGate], now);
+      if (blocked) {
+        return {
+          allowed: false,
+          retryAfterMs: blocked.blockedUntil - now,
+          reason: blocked.detail,
+          scope: `${req.adAccountId}/insights`,
+        };
+      }
+    }
+
     if (st.pointsBlockedUntil > now) {
       return {
         allowed: false,
@@ -537,12 +697,33 @@ export class MetaScheduler {
       pointsBlockedUntil: 0,
       pointsBlockReason: '',
       buc: new Map(),
+      insights: newGate(),
       breakerReason: undefined,
       writeDepth: 0,
       writeChain: undefined,
     };
     this.accounts.set(adAccountId, st);
     return st;
+  }
+
+  /**
+   * Record a fresh reading on a percentage-only gate, and extend its stand-off if this
+   * reading justifies a longer one.
+   *
+   * The percentage always updates — that is what the dashboard reads, and it must decay
+   * with the account rather than ratchet. The BLOCK only ever extends, and only relabels
+   * itself when the new stand-off is at least as long as the standing one, for the same
+   * reason the BUC gate does it: Meta's percentages are a lagging snapshot that will read
+   * clean the instant before it cuts you off again, so a rosy reading arriving mid-backoff
+   * must not release the governor early or rename a block it did not cause.
+   */
+  private raise(gate: Gate, now: number, backoffMs: number, pct: number, detail: string): void {
+    gate.pct = pct;
+    if (backoffMs <= 0) return;
+    const until = now + clampBackoff(backoffMs);
+    if (until < gate.blockedUntil) return;
+    gate.blockedUntil = until;
+    gate.detail = detail;
   }
 
   private bucGate(st: AccountState, useCase: string): BucGate {
@@ -609,11 +790,41 @@ function pointCost(lane: Lane): number {
  * is not the literal `standard_access` is still Limited — the dossier records the header
  * strings as unchanged by the May 2026 Limited/Full rename, but defensive parsing costs
  * nothing and a wrong guess upwards would run a 60-point account at a 9000-point ceiling.
+ *
+ * THREE headers carry `ads_api_access_tier`, not one: `x-business-use-case-usage`,
+ * `x-ad-account-usage` and `x-fb-ads-insights-throttle`. Reading only the first left a
+ * Full-tier account on the 60-point Limited ceiling whenever the response that reported
+ * the tier happened to be one of the other two — 20 writes per five minutes instead of
+ * 3000, which is not a slow account, it is a stopped one.
  */
 function tierOf(state: RateLimitState): 'FULL' | 'LIMITED' | undefined {
-  if (isFullTier(state)) return 'FULL';
-  for (const u of state.buc.values()) if (u.adsApiAccessTier !== undefined) return 'LIMITED';
-  return undefined;
+  const tiers = observedAccessTiers(state);
+  if (tiers.length === 0) return undefined;
+  return tiers.includes('standard_access') ? 'FULL' : 'LIMITED';
+}
+
+/** Which governor band a percentage falls in, in milliseconds of stand-off. 0 = fine. */
+function governed(
+  pct: number,
+  g: { WARN_PCT: number; WARN_MS: number; CRIT_PCT: number; CRIT_MS: number },
+): number {
+  if (pct >= g.CRIT_PCT) return g.CRIT_MS;
+  if (pct >= g.WARN_PCT) return g.WARN_MS;
+  return 0;
+}
+
+/**
+ * The gate with the longest standing block, or undefined if none is blocking. The caller
+ * must be told the longest wait, not the first one found: reporting the shorter of two
+ * live blocks sends a durable workflow back for a second refusal it could have skipped.
+ */
+function longestBlock(gates: readonly Gate[], now: number): Gate | undefined {
+  let worst: Gate | undefined;
+  for (const g of gates) {
+    if (g.blockedUntil <= now) continue;
+    if (!worst || g.blockedUntil > worst.blockedUntil) worst = g;
+  }
+  return worst;
 }
 
 function clamp(v: number, lo: number, hi: number): number {

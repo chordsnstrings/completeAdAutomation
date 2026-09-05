@@ -1141,3 +1141,152 @@ test('naming: a maximum-length name still fits the real idempotency stamp untrun
     assert.equal(parseObjectName(stamped)?.level, level);
   }
 });
+
+// ---------------------------------------------------------------------------
+// On-Meta destinations — the archetypes with no website URL
+// ---------------------------------------------------------------------------
+
+/** Exactly what domain/brand.ts demands per archetype, and not one field more. */
+const ARCHETYPE_DESTINATIONS: Record<ConversionArchetype, Brand['destination']> = {
+  website_purchase: { url: 'https://shop.acme.com/serum', pixelId: '5550001', customEventType: 'PURCHASE' },
+  website_lead: { url: 'https://acme.com/consult', pixelId: '5550001', customEventType: 'LEAD' },
+  instant_form_lead: { leadFormId: '4001' },
+  messenger_lead: {},
+  whatsapp_conversation: {},
+  phone_call: { phoneNumber: '+15551234567' },
+  catalog_sales: { productSetId: '6001', customEventType: 'PURCHASE' },
+  traffic: { url: 'https://acme.com/lp' },
+  app_install: { applicationId: '8001', objectStoreUrl: 'https://apps.apple.com/app/id1' },
+};
+
+const ARCHETYPE_CTA: Record<ConversionArchetype, VideoCreativeInput['callToActionType']> = {
+  website_purchase: 'SHOP_NOW',
+  website_lead: 'SIGN_UP',
+  instant_form_lead: 'SIGN_UP',
+  messenger_lead: 'MESSAGE_PAGE',
+  whatsapp_conversation: 'WHATSAPP_MESSAGE',
+  phone_call: 'CALL_NOW',
+  catalog_sales: 'SHOP_NOW',
+  traffic: 'LEARN_MORE',
+  app_install: 'INSTALL_APP',
+};
+
+function archetypeRequest(archetype: ConversionArchetype): PublishRequest {
+  return makeRequest({
+    brand: { archetype, destination: ARCHETYPE_DESTINATIONS[archetype] },
+    creative: { callToActionType: ARCHETYPE_CTA[archetype] },
+  });
+}
+
+test('publish: every archetype builds a whole tree from a Brand brand.ts accepts', () => {
+  // The contract between domain/brand.ts and this module: a config the loader validates as
+  // GOOD must be publishable without an operator discovering a second, undocumented field.
+  const archetypes = Object.keys(ARCHETYPE_DESTINATIONS) as ConversionArchetype[];
+  for (const archetype of archetypes) {
+    const req = archetypeRequest(archetype);
+    assert.ok(buildCampaignRequest(req).params['objective'], `${archetype}: campaign`);
+    assert.ok(buildAdSetRequest(req, { campaignId: '1' }).params['optimization_goal'], `${archetype}: ad set`);
+    assert.ok(
+      buildAdRequest(req, { adSetId: '2', creativeId: '3' }).params['adset_id'],
+      `${archetype}: ad`,
+    );
+    if (archetype === 'catalog_sales') continue; // a different creative shape, refused on purpose
+    const value = (json(buildCreativeRequest(req).params, 'object_story_spec') as {
+      video_data: { call_to_action: { value: Record<string, string> } };
+    }).video_data.call_to_action.value;
+    assert.ok(
+      Object.keys(value).length > 0,
+      `${archetype}: an empty call_to_action.value leaves the ad with no destination at all`,
+    );
+  }
+});
+
+test('creative: a click-to-message ad names its surface instead of demanding a URL', () => {
+  for (const [archetype, appDestination] of [
+    ['messenger_lead', 'MESSENGER'],
+    ['whatsapp_conversation', 'WHATSAPP'],
+  ] as const) {
+    const params = buildCreativeRequest(archetypeRequest(archetype)).params;
+    const spec = json(params, 'object_story_spec') as {
+      video_data: { call_to_action: { value: Record<string, string> } };
+    };
+    assert.deepEqual(spec.video_data.call_to_action.value, { app_destination: appDestination });
+    assert.ok(!('url_tags' in params), 'an m.me / WhatsApp thread has no query string to decorate');
+    // The ad set has to agree about where the click goes.
+    const adset = buildAdSetRequest(archetypeRequest(archetype), { campaignId: '1' }).params;
+    assert.equal(adset['destination_type'], archetype === 'messenger_lead' ? 'LEAD_FROM_MESSENGER' : 'WHATSAPP');
+  }
+});
+
+test('creative: a click-to-call ad dials the number brand.ts made mandatory', () => {
+  const params = buildCreativeRequest(archetypeRequest('phone_call')).params;
+  const spec = json(params, 'object_story_spec') as {
+    video_data: { call_to_action: { type: string; value: Record<string, string> } };
+  };
+  assert.deepEqual(spec.video_data.call_to_action, { type: 'CALL_NOW', value: { link: 'tel:+15551234567' } });
+  assert.ok(!('url_tags' in params), 'nothing to append utm parameters to');
+});
+
+test('creative: a non-E.164 phone number is refused rather than dialled into nowhere', () => {
+  assertFails(
+    () => buildCreativeRequest(makeRequest({
+      brand: { archetype: 'phone_call', destination: { phoneNumber: '(555) 123-4567' } },
+      creative: { callToActionType: 'CALL_NOW' },
+    })),
+    'object_story_spec.video_data.call_to_action.value.link',
+    'E.164',
+  );
+});
+
+test('creative: a hand-written tel: URI in creative.link is refused, number or not', () => {
+  assertFails(
+    () => buildCreativeRequest(makeRequest({
+      brand: { archetype: 'phone_call', destination: { phoneNumber: '+15551234567' } },
+      creative: { callToActionType: 'CALL_NOW', link: 'tel:+15551234567' },
+    })),
+    'call_to_action.value.link',
+    'must be http or https',
+  );
+});
+
+test('creative: the undocumented on-Meta recipe warns UNVERIFIED rather than passing silently', () => {
+  for (const archetype of ['messenger_lead', 'whatsapp_conversation', 'phone_call'] as const) {
+    const warnings = validatePublishRequest(archetypeRequest(archetype));
+    assert.ok(
+      warnings.some((w) => w.includes('UNVERIFIED') && w.includes('click-to-message')),
+      `${archetype} should flag the missing click-to-message dossier: ${JSON.stringify(warnings)}`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// bid_amount lives on the ad set, under either budget level
+// ---------------------------------------------------------------------------
+
+test('budget: bid_amount is an ad set field under BOTH budget levels, never a campaign one', () => {
+  // §3's campaign create field table does not list bid_amount at all; §6.4 documents it on
+  // the ad set, and §9 records it as deprecated at the ad level. §12 moves only
+  // bid_STRATEGY to the campaign under CBO. A cap emitted on the campaign is either
+  // dropped or a code 100 — a bid silently not applied, which costs money quietly.
+  const cbo = makeRequest({ options: { bidStrategy: 'COST_CAP', bidAmountMinor: 500 } });
+  const cboCampaign = buildCampaignRequest(cbo).params;
+  const cboAdSet = buildAdSetRequest(cbo, { campaignId: '1' }).params;
+  assert.ok(!('bid_amount' in cboCampaign), 'CBO: bid_amount must not ride along with bid_strategy');
+  assert.equal(cboCampaign['bid_strategy'], 'COST_CAP', 'CBO: bid_strategy follows the budget');
+  assert.equal(cboAdSet['bid_amount'], '500');
+  assert.ok(!('bid_strategy' in cboAdSet), 'CBO: bid_strategy in two places is a code 100');
+
+  const abo = makeRequest({
+    options: { budgetLevel: 'adset', adSetBudgetSharing: false, bidStrategy: 'LOWEST_COST_WITH_BID_CAP', bidAmountMinor: 250 },
+  });
+  const aboCampaign = buildCampaignRequest(abo).params;
+  const aboAdSet = buildAdSetRequest(abo, { campaignId: '1' }).params;
+  assert.ok(!('bid_amount' in aboCampaign), 'ABO: the campaign carries no bid fields');
+  assert.equal(aboAdSet['bid_amount'], '250');
+  assert.equal(aboAdSet['bid_strategy'], 'LOWEST_COST_WITH_BID_CAP');
+
+  // An uncapped strategy still emits nothing, on either node.
+  const uncapped = makeRequest();
+  assert.ok(!('bid_amount' in buildCampaignRequest(uncapped).params));
+  assert.ok(!('bid_amount' in buildAdSetRequest(uncapped, { campaignId: '1' }).params));
+});

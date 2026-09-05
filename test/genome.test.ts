@@ -45,6 +45,7 @@ import {
   genomeFromAdName,
   hitRate,
   looksLikeGenomeCode,
+  mediumForAssetType,
   pacingForCutsPer10s,
   shouldRetireAngle,
   spendUseRatio,
@@ -52,6 +53,8 @@ import {
   validateAngle,
   validateGenome,
   type Angle,
+  type AssetMedium,
+  type AssetType,
   type AnglePerformance,
   type CreativeGenome,
   type CreativeTemplate,
@@ -452,6 +455,161 @@ test('a still frame cannot have cuts, music, or motion captions', () => {
   assert.ok(codes.includes('static_with_pacing'));
   assert.ok(codes.includes('static_with_music'));
   assert.ok(codes.includes('static_with_motion_captions'));
+});
+
+// --- medium coherence ------------------------------------------------------
+// The rules above keyed off durationBucket alone. `assetType` is the other half of the
+// same fact (§4.5's `medium: video|static|carousel|gif`), and it was unguarded.
+
+/** The medium every asset type implies, restated here so the module cannot grade itself. */
+const EXPECTED_MEDIUM: Readonly<Record<AssetType, AssetMedium>> = {
+  text_only: 'either',
+  product_image_with_text: 'still',
+  lifestyle_product_image: 'still',
+  ugc: 'either',
+  high_production: 'either',
+  gif: 'silent_motion',
+  illustration: 'still',
+  ugc_mashup: 'either',
+  lifestyle_product_image_with_text: 'still',
+  lifestyle_image_with_text: 'still',
+  lifestyle_image: 'still',
+  hybrid: 'either',
+  product_image: 'still',
+  animation: 'motion',
+  carousel: 'multi_card',
+};
+
+/** A vector whose only possible faults are medium ones. */
+function mediumProbe(patch: Partial<CreativeGenome>): CreativeGenome {
+  return { ...specDefaultGenome('problem_solution_demo'), spokespersonType: 'none', ...patch };
+}
+
+test('every asset type declares a medium, and it is the one the taxonomy implies', () => {
+  assert.equal(Object.keys(EXPECTED_MEDIUM).length, ASSET_TYPES.length);
+  for (const assetType of ASSET_TYPES) {
+    assert.equal(mediumForAssetType(assetType), EXPECTED_MEDIUM[assetType], assetType);
+  }
+});
+
+test('a still-image asset cannot carry cuts, music or motion captions, whatever its duration bucket', () => {
+  // The defect: these all validated clean because durationBucket was not "static".
+  for (const assetType of ASSET_TYPES.filter((a) => EXPECTED_MEDIUM[a] === 'still')) {
+    const g = mediumProbe({
+      assetType, durationBucket: 's30_60', pacing: 'rapid', musicPresence: 'trending', captionStyle: 'burned_in_karaoke',
+    });
+    const codes = validateGenome(g).errors.map((e) => e.code).sort();
+    assert.deepEqual(
+      codes,
+      ['static_with_motion_captions', 'static_with_music', 'static_with_pacing'],
+      `${assetType} accepted attributes that were never on screen`,
+    );
+    assert.throws(() => assertValidGenome(g), GenomeError);
+    assert.throws(
+      () => adNameForGenome({ brandId: 'acme-wallets', archetype: 'website_purchase', genome: g }),
+      GenomeError,
+      `${assetType} would have been published`,
+    );
+  }
+});
+
+test('the message names which field made the creative a single frame', () => {
+  const byAsset = validateGenome(mediumProbe({ assetType: 'illustration', durationBucket: 's15_30', pacing: 'fast' }))
+    .errors.find((e) => e.code === 'static_with_pacing');
+  assert.match(byAsset?.message ?? '', /assetType "illustration"/);
+  const byDuration = validateGenome(mediumProbe({ assetType: 'ugc', durationBucket: 'static', pacing: 'fast' }))
+    .errors.find((e) => e.code === 'static_with_pacing');
+  assert.match(byDuration?.message ?? '', /durationBucket "static"/);
+});
+
+test('an inherently moving asset cannot have a static duration — the mirror of the same rule', () => {
+  for (const assetType of ASSET_TYPES.filter((a) => EXPECTED_MEDIUM[a] === 'motion' || EXPECTED_MEDIUM[a] === 'silent_motion')) {
+    const g = mediumProbe({ assetType, durationBucket: 'static', pacing: 'static', musicPresence: 'none', captionStyle: 'burned_in_static' });
+    const codes = validateGenome(g).errors.map((e) => e.code);
+    assert.ok(codes.includes('motion_asset_with_static_duration'), `${assetType} was allowed to be a still: ${JSON.stringify(codes)}`);
+  }
+});
+
+test('a GIF has no audio track, so it can carry neither music nor platform auto-captions', () => {
+  const codes = validateGenome(mediumProbe({
+    assetType: 'gif', durationBucket: 's6_15', pacing: 'fast', musicPresence: 'trending', captionStyle: 'platform_auto',
+  })).errors.map((e) => e.code).sort();
+  assert.deepEqual(codes, ['silent_asset_with_music', 'silent_asset_with_platform_captions']);
+  // It moves, though: burned-in word-by-word captions and a cut rate are fine on a GIF.
+  assert.deepEqual(
+    validateGenome(mediumProbe({ assetType: 'gif', durationBucket: 's6_15', pacing: 'fast', musicPresence: 'none', captionStyle: 'burned_in_word_by_word' })).errors,
+    [],
+  );
+});
+
+test('the production tiers that ship both ways are never refused on medium grounds', () => {
+  // A false refusal here deletes real, buildable creatives from the corpus, which this
+  // module treats as the more expensive error. `text_only` and `hybrid` in particular are
+  // §5.4's stage-1 discovery tiers and ship as statics AND as short videos.
+  for (const assetType of ASSET_TYPES.filter((a) => EXPECTED_MEDIUM[a] === 'either' || EXPECTED_MEDIUM[a] === 'multi_card')) {
+    for (const durationBucket of DURATION_BUCKETS.filter((d) => d !== 'static')) {
+      const g = mediumProbe({ assetType, durationBucket, pacing: 'rapid', musicPresence: 'trending', captionStyle: 'burned_in_karaoke' });
+      assert.deepEqual(validateGenome(g).errors, [], `${assetType} at ${durationBucket} was refused`);
+    }
+  }
+});
+
+test('a still held on screen for a few seconds is endorsed by §5.7, not a contradiction', () => {
+  // TEMPLATE_SPECS.offer_led pairs defaultAssetType product_image_with_text with
+  // durationBuckets ["static", "s3_8"], so duration must stay OUT of the still rules.
+  const g: CreativeGenome = { ...specDefaultGenome('offer_led'), durationBucket: 's3_8' };
+  assert.deepEqual(validateGenome(g).errors, []);
+});
+
+test('medium coherence is decided by the asset type and the duration bucket only', () => {
+  // A sweep rather than a spot check: no other attribute may switch a medium rule on or
+  // off, or the rule is really keying off something it does not name.
+  const mediumCodes = new Set([
+    'static_with_pacing', 'static_with_music', 'static_with_motion_captions',
+    'motion_asset_with_static_duration', 'silent_asset_with_music', 'silent_asset_with_platform_captions',
+  ]);
+  const baseline = new Map<string, string>();
+  for (const assetType of ASSET_TYPES) {
+    for (const durationBucket of DURATION_BUCKETS) {
+      for (const pacing of PACINGS) {
+        for (const musicPresence of MUSIC_PRESENCES) {
+          for (const captionStyle of CAPTION_STYLES) {
+            const key = `${assetType}|${durationBucket}|${pacing}|${musicPresence}|${captionStyle}`;
+            const codes = validateGenome(mediumProbe({ assetType, durationBucket, pacing, musicPresence, captionStyle }))
+              .errors.map((e) => e.code).filter((c) => mediumCodes.has(c)).sort().join(',');
+            baseline.set(key, codes);
+          }
+        }
+      }
+    }
+  }
+  assert.equal(baseline.size, ASSET_TYPES.length * DURATION_BUCKETS.length * PACINGS.length * MUSIC_PRESENCES.length * CAPTION_STYLES.length);
+  assert.ok([...baseline.values()].some((v) => v !== ''), 'the sweep refused nothing');
+  assert.ok([...baseline.values()].some((v) => v === ''), 'the sweep refused everything');
+  // Now vary every attribute the rules must NOT depend on and demand the same verdict.
+  for (const [key, expected] of baseline) {
+    const [assetType, durationBucket, pacing, musicPresence, captionStyle] = key.split('|') as [
+      AssetType, CreativeGenome['durationBucket'], CreativeGenome['pacing'], CreativeGenome['musicPresence'], CreativeGenome['captionStyle'],
+    ];
+    for (const irrelevant of [
+      { aspectRatio: '16:9' }, { dominantColour: 'multi_vivid' }, { emotionalRegister: 'shock_alarm' },
+      { awarenessStage: 'most_aware' }, { offerType: 'bundle' }, { primaryTrigger: 'social_proof' },
+    ] as const) {
+      const codes = validateGenome(mediumProbe({ assetType, durationBucket, pacing, musicPresence, captionStyle, ...irrelevant }))
+        .errors.map((e) => e.code).filter((c) => mediumCodes.has(c)).sort().join(',');
+      assert.equal(codes, expected, `${key} + ${JSON.stringify(irrelevant)} changed the medium verdict`);
+    }
+  }
+});
+
+test('a button that promises an offer is refused when there is no offer', () => {
+  const codes = validateGenome(mediumProbe({ cta: 'GET_OFFER', offerType: 'none' })).errors.map((e) => e.code);
+  assert.ok(codes.includes('offer_cta_without_offer'), JSON.stringify(codes));
+  // Every other CTA asserts a path to buy, not a deal, and must not be caught by it.
+  for (const cta of GENOME_CTAS.filter((c) => c !== 'GET_OFFER')) {
+    const other = validateGenome(mediumProbe({ cta, offerType: 'none' })).errors.map((e) => e.code);
+    assert.ok(!other.includes('offer_cta_without_offer'), `cta ${cta} was wrongly refused`);
+  }
 });
 
 test('an offer-led template without an offer is refused', () => {

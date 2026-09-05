@@ -737,7 +737,7 @@ test('each documented ad video limit is enforced and names the offending value',
     ['videoBitrateBps', { videoBitrateBps: 40_000_000 }, /40\.0 Mbps exceeds/],
     ['videoCodec', { videoCodec: 'vp9' }, /not H\.264/],
     ['audioCodec', { audioCodec: 'opus' }, /not AAC/],
-    ['audioBitrateBps', { audioBitrateBps: 64_000 }, /64 kbps is below/],
+    ['audioBitrateBps', { audioBitrateBps: 64_000 }, /64\.0 kbps is below the documented "128kbps\+"/],
     ['audioSampleRateHz', { audioSampleRateHz: 96_000 }, /exceeds the 48 kHz maximum/],
     ['container', { container: 'webm' }, /not MP4 or MOV/],
     ['fileSizeBytes', { fileSizeBytes: 5 * 1024 * 1024 * 1024 }, /exceeds Meta's 4 GB/],
@@ -750,6 +750,31 @@ test('each documented ad video limit is enforced and names the offending value',
     assert.deepEqual(v.errors.map((e) => e.field), [field]);
     assert.match(v.errors[0]?.message ?? '', pattern);
   }
+});
+
+test('a realised AAC average just under 128k is a warning, not a publish block', () => {
+  // ffprobe reports the REALISED average of the AAC stream; "128kbps+" constrains the
+  // ENCODER SETTING. [MEASURED, ffmpeg 6.1.1] a nominal -b:a 128k realises 126788-128450
+  // bps depending on content, and the pipeline's own two-pass-loudnorm master realised
+  // 127097 — so a hard floor at exactly 128000 failed roughly half of all compliant
+  // renders and gateContainerSpec turned that into a hard publish block.
+  for (const realised of [127_097, 126_788, 122_000]) {
+    const v = validateAdVideoSpec({ ...GOOD, audioBitrateBps: realised });
+    assert.equal(v.ok, true, `${realised} bps must not block publish`);
+    const w = v.warnings.find((x) => x.field === 'audioBitrateBps');
+    assert.ok(w !== undefined, `${realised} bps must still be reported, not silently accepted`);
+    assert.match(w?.message ?? '', /REALISED average/);
+  }
+  // ...and a genuinely lower nominal setting is still an ERROR. [MEASURED] -b:a 112k
+  // realises 111085-112042 and -b:a 96k realises 95525-96146, both under the 121600 floor.
+  for (const realised of [112_042, 96_146, 64_000]) {
+    const v = validateAdVideoSpec({ ...GOOD, audioBitrateBps: realised });
+    assert.equal(v.ok, false, `${realised} bps is a lower nominal setting and must fail`);
+    assert.deepEqual(v.errors.map((e) => e.field), ['audioBitrateBps']);
+  }
+  // The band boundary itself is exactly 5% under, and it is inclusive.
+  assert.equal(validateAdVideoSpec({ ...GOOD, audioBitrateBps: 121_600 }).ok, true);
+  assert.equal(validateAdVideoSpec({ ...GOOD, audioBitrateBps: 121_599 }).ok, false);
 });
 
 test('the error-352 class of encoder faults is caught before upload', () => {

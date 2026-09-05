@@ -62,6 +62,28 @@ export const AD_VIDEO_SPEC = {
   maxDurationSeconds: 15 * 60,
   /** "stereo AAC audio compression at 128kbps+" — ads guide, verbatim. */
   minAudioBitrateBps: 128_000,
+  /**
+   * Fractional slack applied to `minAudioBitrateBps` before it becomes an ERROR, because
+   * the spec and the measurement are not the same quantity.
+   *
+   * "128kbps+" describes the ENCODER SETTING (`-c:a aac -b:a 128k`, exactly as
+   * creative-production-pipeline.md §12 writes it). `meta.audioBitrateBps` is whatever
+   * the probe reports, and ffprobe reports the REALISED AVERAGE of the AAC stream, which
+   * floats with content. [MEASURED here, ffmpeg 6.1.1] twenty renders at a nominal
+   * `-b:a 128k` realised 126788-128450 bps (tones, pink and white noise, 3-30s); the
+   * pipeline's own two-pass-loudnorm master realised 127097. A zero-tolerance
+   * `< 128000 -> ERROR` therefore fails roughly half of all spec-compliant renders, and
+   * `gateContainerSpec` turns that into a hard publish block — the module cannot publish
+   * what it renders.
+   *
+   * 5% (>= 121600 bps) is 10x the measured ordinary spread and still 9.6 kbps clear of
+   * the next rung down the standard AAC ladder: [MEASURED] a nominal `-b:a 112k` encode
+   * realises 111085-112042 and a nominal `-b:a 96k` realises 95525-96146, so every
+   * genuinely under-configured encode is still an ERROR. Inside the band the finding is
+   * a WARNING, not silence: it names the realised number so a real 112k mistake that
+   * somehow lands high is still visible.
+   */
+  audioBitrateMeasurementTolerance: 0.05,
   maxAudioSampleRateHz: 48_000,
   containers: ['mp4', 'mov'] as const,
   pixelFormat: 'yuv420p',
@@ -288,11 +310,32 @@ export function validateAdVideoSpec(meta: VideoFileMetadata): SpecValidation {
     err('audioCodec', 'AD_SPEC', `audio codec "${meta.audioCodec}" is not AAC`);
   }
   if (meta.audioBitrateBps !== undefined && meta.audioBitrateBps < AD_VIDEO_SPEC.minAudioBitrateBps) {
-    err(
-      'audioBitrateBps',
-      'AD_SPEC',
-      `${Math.round(meta.audioBitrateBps / 1000)} kbps is below the documented "128kbps+"`,
-    );
+    // The spec constrains the ENCODER SETTING; this number is the probe's REALISED
+    // AVERAGE. See AD_VIDEO_SPEC.audioBitrateMeasurementTolerance for the measurements
+    // that size the band, and for why a hard floor at exactly 128000 blocks the
+    // pipeline's own compliant renders.
+    const floor = AD_VIDEO_SPEC.minAudioBitrateBps * (1 - AD_VIDEO_SPEC.audioBitrateMeasurementTolerance);
+    const measured = `${(meta.audioBitrateBps / 1000).toFixed(1)} kbps`;
+    if (meta.audioBitrateBps < floor) {
+      err(
+        'audioBitrateBps',
+        'AD_SPEC',
+        `${measured} is below the documented "128kbps+" by more than the ` +
+          `${(AD_VIDEO_SPEC.audioBitrateMeasurementTolerance * 100).toFixed(0)}% measurement tolerance ` +
+          `(floor ${Math.round(floor)} bps). A realised AAC average this far down is a lower nominal ` +
+          `setting, not encoder variance — re-encode with -c:a aac -b:a 128k. (If the encode really was ` +
+          `128k, the source audio is so simple the encoder could not spend the bits; check the mix.)`,
+      );
+    } else {
+      warn(
+        'audioBitrateBps',
+        'AD_SPEC',
+        `${measured} is marginally under the documented "128kbps+". This is the REALISED average the ` +
+          `probe measured, not the encoder setting the spec constrains: [MEASURED] a nominal ` +
+          `-b:a 128k lands anywhere in 126.8-128.5 kbps depending on content, so this is not a defect ` +
+          `on its own. Confirm the encode passes -b:a 128k; do not "fix" it by raising the bitrate.`,
+      );
+    }
   }
   if (meta.audioSampleRateHz !== undefined && meta.audioSampleRateHz > AD_VIDEO_SPEC.maxAudioSampleRateHz) {
     err('audioSampleRateHz', 'ORGANIC_SPEC', `${meta.audioSampleRateHz} Hz exceeds the 48 kHz maximum`);

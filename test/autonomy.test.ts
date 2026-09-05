@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { addDays, completenessFactor, type CompletenessCurve } from '../src/meta/insights.ts';
 import {
   DEFAULT_PRIOR_CONVERSIONS,
+  DEFAULT_SEQUENTIAL_ALPHA,
   DecisionInputError,
   compareCpa,
   conversionsRequiredPerArm,
@@ -20,9 +21,11 @@ import {
   powerCheck,
   priorForBrand,
   priorForTargetCpa,
+  poolEvidence,
   probCpaAbove,
   probCpaRatioBelow,
   sampleGamma,
+  sequentialCompare,
   thompsonPick,
   thompsonWinProbabilities,
   type DailyStat,
@@ -710,6 +713,266 @@ test('powerCheck reports "cannot tell yet" instead of inventing a winner', () =>
   assert.ok(strong.detectableEffect < 0.2);
   // A zero-conversion arm can resolve nothing at all, and says so.
   assert.equal(powerCheck(0, 1000).detectableEffect, Number.POSITIVE_INFINITY);
+});
+
+// ---------------------------------------------------------------------------
+// Reference selection and repeated looks — the premature-kill defect
+// ---------------------------------------------------------------------------
+
+/** Rows that are fully settled, so F(age) = 1 and the arithmetic below is exact. */
+function settled(id: string, conversions: number, spendMinor: number, over: Partial<AdEvidence> = {}): AdEvidence {
+  return {
+    adId: id,
+    adSetId: 'as_1',
+    rows: [{ statDate: addDays(AS_OF, -40), spendMinor, conversions }],
+    ageDays: 60,
+    impressions: 500_000,
+    impressionsLast24h: 20_000,
+    effectiveStatus: 'ACTIVE',
+    learningStatus: 'SUCCESS',
+    daysSinceSignificantEdit: 30,
+    attributionSettings: ['1d_click'],
+    ...over,
+  };
+}
+
+function slateOf(ads: readonly AdEvidence[]) {
+  return decideSlate({
+    asOfDate: AS_OF,
+    targetCpaMinor: TARGET_CPA,
+    gates: GATES,
+    ads,
+    rng: createSeededRng(7),
+    thompsonDraws: 64,
+  });
+}
+
+test('nothing is judged against the ad that happens to be leading', () => {
+  // Five creatives at exactly the target CPA, except one that drew the same 40 conversions
+  // for less money. Under the old rule that lucky ad became the yardstick for the whole
+  // slate and everything else was 54% "worse" than it — a 0.856 kill probability against a
+  // 0.80 bar, i.e. FOUR SIMULTANEOUS KILLS on a slate with nothing wrong in it. The
+  // reference is now the pooled rest of the slate, which the lucky ad cannot dominate.
+  const ads = [
+    settled('a', 40, 160_000),
+    settled('b', 40, 160_000),
+    settled('c', 40, 160_000),
+    settled('d', 40, 160_000),
+    settled('lucky', 40, 104_000),
+  ];
+  const oldRule = compareCpa({ shape: 41, rate: 164_000 }, { shape: 41, rate: 108_000 }, 0.2);
+  assert.ok(
+    oldRule.pWorseByThreshold >= DEFAULT_THRESHOLDS.killAt,
+    `the fixture must be one the old winner-as-reference rule would kill: ${oldRule.pWorseByThreshold}`,
+  );
+
+  const slate = slateOf(ads);
+  for (const d of slate.decisions) {
+    assert.notEqual(d.verdict, 'KILL', `${d.adId}: ${d.reason}`);
+    assert.equal(d.referenceAdIds.length, 4, `${d.adId} must be judged against the other four`);
+    assert.ok(!d.referenceAdIds.includes(d.adId), 'an ad must never be part of its own reference');
+    assert.equal(d.comparedToAdId, undefined, 'a five-ad slate has no single reference ad');
+  }
+  // And the leader is still identified — it is just no longer the yardstick.
+  assert.equal(slate.incumbentAdId, 'lucky');
+});
+
+test('the reference is the pooled rest of the slate, with the prior counted once', () => {
+  const prior = priorForTargetCpa(TARGET_CPA);
+  const pooled = poolEvidence(prior, [
+    { conversions: 10, effectiveSpendMinor: 40_000 },
+    { conversions: 30, effectiveSpendMinor: 100_000 },
+  ]);
+  assert.equal(pooled.conversions, 40);
+  assert.equal(pooled.exposureMinor, 140_000);
+  assert.equal(pooled.arms, 2);
+  assert.equal(pooled.posterior.shape, prior.shape + 40);
+  assert.equal(pooled.posterior.rate, prior.rate + 140_000);
+  // Not once per arm: a two-ad pool must not be twice as sure about the target CPA as one ad.
+  assert.notEqual(pooled.posterior.shape, 2 * prior.shape + 40);
+});
+
+test('the always-valid test finds nothing between identical arms and a lot against a real loser', () => {
+  const identical = sequentialCompare('WORSE', 60, 240_000, 240, 960_000, 0.2);
+  assert.equal(identical.rejected, false);
+  assert.ok(identical.eValue < 1, `identical arms produced evidence ${identical.eValue}`);
+  assert.equal(identical.anytimeP, 1);
+
+  // Same exposure, a fifth of the conversions: unmistakable.
+  const loser = sequentialCompare('WORSE', 20, 240_000, 400, 960_000, 0.2);
+  assert.equal(loser.rejected, true);
+  assert.ok(loser.eValue > 1000, `${loser.eValue}`);
+  assert.ok(loser.anytimeP < 1e-3);
+
+  // Direction is symmetric: the same pair, asked the other way round, finds nothing.
+  assert.equal(sequentialCompare('BETTER', 20, 240_000, 400, 960_000, 0).rejected, false);
+  assert.equal(sequentialCompare('BETTER', 400, 960_000, 20, 240_000, 0).rejected, true);
+
+  // No exposure on one side is an absent comparison, not evidence.
+  assert.equal(sequentialCompare('WORSE', 0, 0, 400, 960_000, 0.2).rejected, false);
+  assert.equal(sequentialCompare('WORSE', 0, 100_000, 0, 100_000, 0.2).eValue, 1);
+});
+
+test('the threshold of caring is inside the null: being merely equal is not evidence of being worse', () => {
+  // An arm that is EXACTLY as expensive as its reference, with a lot of data. A test of
+  // "different" would eventually reject; a test of "worse by more than 20%" must not.
+  const equal = sequentialCompare('WORSE', 2000, 8_000_000, 2000, 8_000_000, 0.2);
+  assert.equal(equal.rejected, false);
+  assert.ok(equal.eValue < 0.05, `${equal.eValue}`);
+  // 10% worse is inside the indifference region too, however much data there is.
+  const mild = sequentialCompare('WORSE', 1818, 8_000_000, 2000, 8_000_000, 0.2);
+  assert.equal(mild.rejected, false);
+  // 40% worse is not.
+  const real = sequentialCompare('WORSE', 1429, 8_000_000, 2000, 8_000_000, 0.2);
+  assert.equal(real.rejected, true);
+});
+
+test('THE REPEATED-LOOKS TEST: 30 daily looks at identical arms must not compound into a kill', () => {
+  // Five identical creatives, 8000 minor units/day each at the target CPA, judged EVERY DAY
+  // for 30 days. Each arm is compared with the pooled other four. The single-look posterior
+  // bar is asked 23 times against unchanged truth and crosses often; the always-valid
+  // statistic is asked exactly as often and must not.
+  const rng = createSeededRng(4242);
+  const daily = 8000;
+  const reps = 120;
+  let sequentialKills = 0;
+  let singleLookKills = 0;
+  let arms = 0;
+
+  const poisson = (lambda: number): number => {
+    const limit = Math.exp(-lambda);
+    let k = 0;
+    let p = 1;
+    do {
+      k += 1;
+      p *= rng();
+    } while (p > limit);
+    return k - 1;
+  };
+
+  for (let r = 0; r < reps; r++) {
+    const counts = [0, 0, 0, 0, 0];
+    const seqFired = [false, false, false, false, false];
+    const naiveFired = [false, false, false, false, false];
+    for (let day = 1; day <= 30; day++) {
+      for (let i = 0; i < counts.length; i++) counts[i] = (counts[i] ?? 0) + poisson(daily / TARGET_CPA);
+      if (day < 8) continue; // the age gate; nothing is judged before then
+      const spend = daily * day;
+      const total = counts.reduce((a, b) => a + b, 0);
+      for (let i = 0; i < counts.length; i++) {
+        const c = counts[i] ?? 0;
+        const rest = total - c;
+        const t = sequentialCompare('WORSE', c, spend, rest, 4 * spend, 0.2, DEFAULT_SEQUENTIAL_ALPHA);
+        if (t.rejected) seqFired[i] = true;
+        const naive = compareCpa(
+          { shape: 1 + c, rate: TARGET_CPA + spend },
+          { shape: 1 + rest, rate: TARGET_CPA + 4 * spend },
+          0.2,
+        );
+        if (naive.pWorseByThreshold >= DEFAULT_THRESHOLDS.killAt) naiveFired[i] = true;
+      }
+    }
+    for (let i = 0; i < counts.length; i++) {
+      arms += 1;
+      if (seqFired[i] === true) sequentialKills += 1;
+      if (naiveFired[i] === true) singleLookKills += 1;
+    }
+  }
+
+  const seqRate = sequentialKills / arms;
+  const naiveRate = singleLookKills / arms;
+  // The target the synthesis puts a number on. Nothing in this slate is bad, so every
+  // firing is premature by construction.
+  assert.ok(seqRate < 0.05, `always-valid premature-kill rate ${(100 * seqRate).toFixed(1)}% over ${arms} arms`);
+  // And the check is not vacuous: the single-look bar it replaces fires far more often on
+  // the very same draws. If this ever stops being true the test above has stopped testing.
+  assert.ok(
+    naiveRate > 3 * Math.max(seqRate, 0.01),
+    `the single-look bar fired on ${(100 * naiveRate).toFixed(1)}% and the sequential one on ` +
+      `${(100 * seqRate).toFixed(1)}% — the fixture no longer exhibits the defect`,
+  );
+});
+
+test('a single-look kill that the always-valid test does not support is HELD, and says so', () => {
+  // Six conversions at twice the reference's CPA. P(worse by >20%) is 0.88, comfortably over
+  // the 0.80 bar — and it is six conversions. This is the exact shape of the 39.8% failure.
+  const slate = slateOf([settled('ref', 30, 120_000), settled('thin', 6, 48_000)]);
+  const d = slate.decisions.find((x) => x.adId === 'thin');
+  assert.ok(d);
+  assert.ok(
+    (d.comparison?.pWorseByThreshold ?? 0) >= DEFAULT_THRESHOLDS.killAt,
+    `the fixture must clear the single-look bar: ${d.comparison?.pWorseByThreshold}`,
+  );
+  assert.equal(d.sequentialWorse?.rejected, false);
+  assert.equal(d.verdict, 'HOLD', d.reason);
+  assert.match(d.reason, /SINGLE look/);
+  assert.match(d.reason, /always-valid/);
+});
+
+test('the always-valid gate does not stop a genuine loser being killed', () => {
+  // The same slate shape with real evidence behind it: four ads at the target CPA and one at
+  // 2.3x, on equal spend. A fix that simply stops killing is not a fix.
+  const slate = slateOf([
+    settled('g1', 100, 400_000),
+    settled('g2', 100, 400_000),
+    settled('g3', 100, 400_000),
+    settled('g4', 100, 400_000),
+    settled('bad', 44, 400_000),
+  ]);
+  const bad = slate.decisions.find((x) => x.adId === 'bad');
+  assert.ok(bad);
+  assert.equal(bad.verdict, 'KILL', bad.reason);
+  assert.equal(bad.sequentialWorse?.rejected, true);
+  assert.ok((bad.sequentialWorse?.eValue ?? 0) >= 1 / DEFAULT_SEQUENTIAL_ALPHA);
+  for (const d of slate.decisions) {
+    if (d.adId !== 'bad') assert.notEqual(d.verdict, 'KILL', `${d.adId}: ${d.reason}`);
+  }
+});
+
+test('SCALE is gated sequentially too, because spending more is also a decision', () => {
+  const thin = slateOf([settled('ref', 12, 60_000), settled('lead', 12, 36_000)]);
+  const leadThin = thin.decisions.find((x) => x.adId === 'lead');
+  assert.ok(leadThin);
+  assert.ok((leadThin.comparison?.pBetter ?? 0) >= DEFAULT_THRESHOLDS.scaleAt, `${leadThin.comparison?.pBetter}`);
+  assert.equal(leadThin.sequentialBetter?.rejected, false);
+  assert.equal(leadThin.verdict, 'HOLD', leadThin.reason);
+
+  // The same CPA gap with a hundred times the evidence does scale.
+  const thick = slateOf([settled('ref', 1200, 6_000_000), settled('lead', 1200, 3_600_000)]);
+  const leadThick = thick.decisions.find((x) => x.adId === 'lead');
+  assert.ok(leadThick);
+  assert.equal(leadThick.sequentialBetter?.rejected, true);
+  assert.equal(leadThick.verdict, 'SCALE', leadThick.reason);
+});
+
+test('powered() means "these two arms can resolve the gap", not "both arms are big"', () => {
+  // The module's own detectableEffect() uses 1/E1 + 1/E2 precisely because "the incumbent
+  // has months of history and the challenger has days". powered() used to ignore that and
+  // demand the EQUAL-exposure count on each arm, so it withheld EQUIVALENT from exactly the
+  // comparisons carrying the most information.
+  const required = conversionsRequiredPerArm(0.2, 'BAYES_ONE_SIDED_90');
+  const lopsided = powerCheck(80, 5000, 0.2, 'BAYES_ONE_SIDED_90');
+  assert.ok(lopsided.candidateConversions < required);
+  assert.ok(lopsided.detectableEffect <= 0.2);
+  assert.equal(lopsided.powered, true);
+
+  for (const [c, r] of [
+    [80, 5000],
+    [60, 1_000_000],
+    [150, 1000],
+    [20, 1000],
+    [4, 4],
+    [0, 1000],
+    [500, 500],
+  ] as const) {
+    const p = powerCheck(c, r, 0.2, 'BAYES_ONE_SIDED_90');
+    assert.equal(p.powered, p.detectableEffect <= 0.2, `(${c}, ${r}) powered=${p.powered} eff=${p.detectableEffect}`);
+  }
+  // At EQUAL exposure the new rule reproduces the old sample-size table exactly, which is
+  // what makes it the same statement and not a weaker one.
+  assert.equal(powerCheck(Math.ceil(required), Math.ceil(required), 0.2, 'BAYES_ONE_SIDED_90').powered, true);
+  assert.equal(powerCheck(Math.floor(required) - 1, 1e9, 0.2, 'BAYES_ONE_SIDED_90').powered, true);
+  assert.equal(powerCheck(Math.floor(required / 3), 1e9, 0.2, 'BAYES_ONE_SIDED_90').powered, false);
 });
 
 // ---------------------------------------------------------------------------

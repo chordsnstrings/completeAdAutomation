@@ -16,6 +16,20 @@
  *     set that is still in LEARNING. Below the gates, the verdict is HOLD and the reason
  *     names which gate stopped it. There is no "best guess" path.
  *
+ *  2b. **Nothing is judged against the winner, and no bar is asked only once.** These are
+ *     the two ways a decision engine destroys good creative, they compound, and both are
+ *     invisible in any single decision. Judging every ad against the best ad in the slate
+ *     compares it with a SELECTED MAXIMUM — the luckiest of N noisy draws — so the yardstick
+ *     is optimistically biased and the bias grows with the size of the slate. Evaluating a
+ *     single-look posterior bar every day gives the same unchanged evidence 20-odd chances
+ *     to cross it. Together they killed 39.8% of a slate of five genuinely IDENTICAL
+ *     creatives inside a month against a <5% target. So: the reference is the POOLED REST OF
+ *     THE SLATE (leave-one-out, unbiased, independent of the ad being judged), and every
+ *     verdict that moves money must additionally clear an ALWAYS-VALID sequential test whose
+ *     guarantee does not degrade however often it is asked. Neither half is optional — the
+ *     pooled reference alone still leaks through repeated looks, and the sequential test
+ *     alone still inherits the leader's bias.
+ *
  *  3. **Budget clamps are code, not advice.** ±20% per step, never below the account
  *     currency's minimum, at most two writes a day against Meta's hard cap of four an
  *     hour, a monotone daily high-water mark because an upward write is irreversible for
@@ -28,24 +42,31 @@
 import { MISSING_ATTRIBUTION_SETTING, type CompletenessCurve } from '../meta/insights.ts';
 import { CHANGE_CAPS } from '../meta/scheduler.ts';
 import {
+  DEFAULT_SEQUENTIAL_ALPHA,
+  DEFAULT_SEQUENTIAL_DESIGN_EFFECT,
+  DEFAULT_SEQUENTIAL_MIXTURE,
   DEFAULT_THRESHOLD_OF_CARING,
   DecisionInputError,
   compareCpa,
   cpaSummary,
   cpaUpperBoundMinor,
   fitPosterior,
+  poolEvidence,
   powerCheck,
   priorForTargetCpa,
   probCpaAbove,
+  sequentialCompare,
   thompsonWinProbabilities,
   type Comparison,
   type CpaSummary,
   type DailyStat,
   type GammaPosterior,
+  type PooledEvidence,
   type PosteriorFit,
   type PowerCheck,
   type PowerRule,
   type Rng,
+  type SequentialTest,
   type ThompsonArm,
 } from './posterior.ts';
 
@@ -314,18 +335,40 @@ export function evaluateGates(ad: AdEvidence, fit: PosteriorFit, gates: Decision
 export interface DecisionThresholds {
   /** X: relative CPA gap below which we do not care which ad we keep. */
   thresholdOfCaring: number;
-  /** κ_kill — P(worse by more than X) at or above this pauses the ad. */
+  /**
+   * κ_kill — P(worse by more than X) must reach this before an ad can be paused.
+   *
+   * NECESSARY BUT NO LONGER SUFFICIENT. This is a single-look posterior probability, and a
+   * single-look probability evaluated every day for a month is not the test it looks like:
+   * each look is another chance to cross, so the error rate compounds with time even when
+   * nothing about the ad changes. Measured on a slate of five IDENTICAL creatives, a 0.80
+   * bar asked daily for 30 days killed 39.8% of perfectly good ads. It is kept because it is
+   * the sentence a media buyer can actually read — "there is an 87% chance this ad is more
+   * than 20% more expensive" — and because it is a floor on belief. The CALIBRATION comes
+   * from `sequentialAlpha` below, which has to agree.
+   */
   killAt: number;
-  /** κ_scale — P(better) at or above this scales it. */
+  /** κ_scale — P(better) at or above this scales it. Also gated sequentially. */
   scaleAt: number;
   /** ROPE mass at or above this declares equivalence and stops re-litigating. */
   equivalentAt: number;
   /** Which power rule gates EQUIVALENT. */
   powerRule: PowerRule;
+  /**
+   * Ville bound for the always-valid mixture SPRT that must ALSO fire before a verdict is
+   * allowed to spend or destroy money. This one is a real error rate: the probability that
+   * the statistic ever crosses under the null, over the entire life of the ad, however
+   * often it is asked.
+   */
+  sequentialAlpha: number;
+  /** Concentration of the SPRT's mixing distribution. See `DEFAULT_SEQUENTIAL_MIXTURE`. */
+  sequentialMixture: number;
+  /** Where that mixture is centred. See `DEFAULT_SEQUENTIAL_DESIGN_EFFECT`. */
+  sequentialDesignEffect: number;
 }
 
 /**
- * Defaults from the dossier.
+ * Defaults from the dossier, plus the sequential calibration the dossier's numbers assume.
  *
  * Note that `killAt` (0.80) is not symmetric with `scaleAt` (0.85) by accident. Killing an
  * ad forfeits its future value AND pays the learning-phase reset cost of whatever replaces
@@ -338,6 +381,9 @@ export const DEFAULT_THRESHOLDS: DecisionThresholds = {
   scaleAt: 0.85,
   equivalentAt: 0.9,
   powerRule: 'BAYES_ONE_SIDED_90',
+  sequentialAlpha: DEFAULT_SEQUENTIAL_ALPHA,
+  sequentialMixture: DEFAULT_SEQUENTIAL_MIXTURE,
+  sequentialDesignEffect: DEFAULT_SEQUENTIAL_DESIGN_EFFECT,
 };
 
 // ---------------------------------------------------------------------------
@@ -354,14 +400,22 @@ export interface AdDecision {
   cpa: CpaSummary;
   isIncumbent: boolean;
   /**
-   * Which ad this one was judged against. Challengers are judged against the incumbent;
-   * the incumbent is judged against the runner-up, because comparing it with itself
-   * produces a guaranteed tie and no information.
+   * Which ad this one was judged against — present ONLY when the reference happened to be a
+   * single other ad, i.e. a two-ad slate. Otherwise see `referenceAdIds`.
    */
   comparedToAdId?: string;
+  /**
+   * Every gate-passing ad in the slate EXCEPT this one. Their evidence is pooled into the
+   * reference this ad is judged against. Empty means there was nothing to compare against.
+   */
+  referenceAdIds: readonly string[];
   /** Absent when the slate had nothing to compare this ad against. */
   comparison?: Comparison;
   power?: PowerCheck;
+  /** The always-valid test behind KILL. Absent when there was no reference. */
+  sequentialWorse?: SequentialTest;
+  /** The always-valid test behind SCALE. Absent when there was no reference. */
+  sequentialBetter?: SequentialTest;
   /** P(this ad is the best in the slate) under Thompson sampling. Log it as the propensity. */
   winProbability: number;
 }
@@ -403,6 +457,18 @@ export interface SlateDecision {
  * slate, and crowning it makes every other ad look terrible against a reference that is
  * mostly noise. Ranking on the upper bound asks the right question — which ad are we most
  * confident is good — and a small lucky ad cannot win it.
+ *
+ * WHAT THE INCUMBENT IS NOT, ANY MORE: the reference every other ad is judged against.
+ * That is the defect this ranking used to feed. However it is picked, the leader of a slate
+ * is a SELECTED EXTREMUM — the best of N noisy draws — so it is optimistically biased by
+ * construction, and comparing everything else to it imports that bias into every verdict at
+ * once. On a slate of five genuinely IDENTICAL creatives it produced a 39.8% premature-kill
+ * rate, and the rate grew with the number of arms (23.8% at two, 40.0% at five) because that
+ * is what a maximum of N does. Ranking on the upper bound made the bias smaller than ranking
+ * on the mean would have; it did not make it go away, and no choice of leader can.
+ *
+ * The incumbent is now REPORTING only — which ad we would keep if forced to keep one, and
+ * the anchor for `winProbability`. Verdicts are taken against the pooled slate (below).
  */
 export const INCUMBENT_TAIL = 0.1;
 
@@ -444,12 +510,8 @@ export function decideSlate(input: SlateInput): SlateDecision {
     gateReports.set(ad.adId, evaluateGates(ad, fit, input.gates));
   }
 
-  // Only a gate-passing ad may be a reference. Judging challengers against an ad set that
-  // is still in learning propagates that instability into every verdict at once.
-  //
-  // The runner-up is kept as well, because the incumbent needs something to be judged
-  // against: comparing it with itself is a guaranteed tie and tells us nothing, and it is
-  // the incumbent — the leader — that most often deserves the SCALE verdict.
+  // Only a gate-passing ad may contribute to the reference. Pooling an ad set that is still
+  // in learning propagates that instability into every verdict at once.
   const ranked: Array<{ adId: string; fit: PosteriorFit }> = [];
   for (const ad of input.ads) {
     const fit = fits.get(ad.adId);
@@ -460,13 +522,12 @@ export function decideSlate(input: SlateInput): SlateDecision {
   ranked.sort((a, b) => {
     const d = rankKey(a.fit) - rankKey(b.fit);
     if (d !== 0) return d;
-    // Deterministic tie-breaks, so the reference does not wander between runs.
+    // Deterministic tie-breaks, so the ranking does not wander between runs.
     const c = b.fit.conversions - a.fit.conversions;
     if (c !== 0) return c;
     return a.adId < b.adId ? -1 : a.adId > b.adId ? 1 : 0;
   });
   const incumbentId = ranked[0]?.adId;
-  const runnerUpId = ranked[1]?.adId;
 
   const arms: ThompsonArm[] = [];
   for (const ad of input.ads) {
@@ -487,21 +548,68 @@ export function decideSlate(input: SlateInput): SlateDecision {
     const cpa = cpaSummary(fit.posterior);
     const winProbability = wins.get(ad.adId) ?? 0;
 
-    // A challenger is judged against the incumbent; the incumbent against the runner-up.
-    const referenceId = isIncumbent ? runnerUpId : incumbentId;
-    const referenceFit = referenceId === undefined ? undefined : fits.get(referenceId);
+    // THE REFERENCE. Every OTHER gate-passing ad in the slate, pooled — never the winner.
+    //
+    // Leave-one-out has two properties the old "judge everything against the leader" rule
+    // could not have. It is not a selected extremum, so it carries no optimism bias however
+    // many arms the slate has. And it is INDEPENDENT of the ad being judged, which is what
+    // makes the sequential test below an honest two-sample test instead of a comparison of
+    // an ad with a quantity that partly contains it.
+    const referenceAdIds = ranked.filter((r) => r.adId !== ad.adId).map((r) => r.adId);
+    const pool: PooledEvidence | undefined =
+      referenceAdIds.length === 0
+        ? undefined
+        : poolEvidence(
+            prior,
+            referenceAdIds.map((id) => {
+              const f = fits.get(id);
+              // Unreachable: `ranked` is built from `fits`.
+              if (f === undefined) fail('slate', `reference ad ${id} lost its posterior.`);
+              return { conversions: f.conversions, effectiveSpendMinor: f.effectiveSpendMinor };
+            }),
+          );
 
     let comparison: Comparison | undefined;
     let power: PowerCheck | undefined;
-    if (referenceFit !== undefined) {
-      comparison = compareCpa(fit.posterior, referenceFit.posterior, thresholds.thresholdOfCaring);
+    let sequentialWorse: SequentialTest | undefined;
+    let sequentialBetter: SequentialTest | undefined;
+    if (pool !== undefined) {
+      comparison = compareCpa(fit.posterior, pool.posterior, thresholds.thresholdOfCaring);
       power = powerCheck(
         fit.conversions,
-        referenceFit.conversions,
+        pool.conversions,
         thresholds.thresholdOfCaring,
         thresholds.powerRule,
       );
+      sequentialWorse = sequentialCompare(
+        'WORSE',
+        fit.conversions,
+        fit.effectiveSpendMinor,
+        pool.conversions,
+        pool.exposureMinor,
+        thresholds.thresholdOfCaring,
+        thresholds.sequentialAlpha,
+        thresholds.sequentialMixture,
+        thresholds.sequentialDesignEffect,
+      );
+      // SCALE asks "better at all", matching `pBetter`: a 21% CPA advantage is worth more
+      // budget, and demanding it be better by more than the threshold of caring as well
+      // would mean the engine could never act on the gap it is designed to detect.
+      sequentialBetter = sequentialCompare(
+        'BETTER',
+        fit.conversions,
+        fit.effectiveSpendMinor,
+        pool.conversions,
+        pool.exposureMinor,
+        0,
+        thresholds.sequentialAlpha,
+        thresholds.sequentialMixture,
+        thresholds.sequentialDesignEffect,
+      );
     }
+    const soleReferenceId = referenceAdIds.length === 1 ? referenceAdIds[0] : undefined;
+    const referenceLabel =
+      soleReferenceId ?? (referenceAdIds.length === 0 ? undefined : `the rest of the slate (${referenceAdIds.length} ads)`);
 
     const { verdict, reason } = verdictFor({
       ad,
@@ -511,9 +619,11 @@ export function decideSlate(input: SlateInput): SlateDecision {
       isIncumbent,
       thresholds,
       targetCpaMinor: input.targetCpaMinor,
-      ...(referenceId !== undefined ? { referenceId } : {}),
+      ...(referenceLabel !== undefined ? { referenceId: referenceLabel } : {}),
       ...(comparison !== undefined ? { comparison } : {}),
       ...(power !== undefined ? { power } : {}),
+      ...(sequentialWorse !== undefined ? { sequentialWorse } : {}),
+      ...(sequentialBetter !== undefined ? { sequentialBetter } : {}),
     });
 
     decisions.push({
@@ -525,9 +635,12 @@ export function decideSlate(input: SlateInput): SlateDecision {
       cpa,
       isIncumbent,
       winProbability,
-      ...(referenceId !== undefined ? { comparedToAdId: referenceId } : {}),
+      referenceAdIds,
+      ...(soleReferenceId !== undefined ? { comparedToAdId: soleReferenceId } : {}),
       ...(comparison !== undefined ? { comparison } : {}),
       ...(power !== undefined ? { power } : {}),
+      ...(sequentialWorse !== undefined ? { sequentialWorse } : {}),
+      ...(sequentialBetter !== undefined ? { sequentialBetter } : {}),
     });
   }
 
@@ -547,14 +660,26 @@ interface VerdictInput {
   thresholds: DecisionThresholds;
   /** The brand's target CPA, minor units. SCALE is held against it, not only against a rival. */
   targetCpaMinor: number;
-  /** The ad this one is judged against, when the slate had one. */
+  /** How to name the reference in the audit trail, when the slate had one. */
   referenceId?: string;
   comparison?: Comparison;
   power?: PowerCheck;
+  sequentialWorse?: SequentialTest;
+  sequentialBetter?: SequentialTest;
 }
 
 function pct(x: number): string {
   return `${(100 * x).toFixed(1)}%`;
+}
+
+function evidence(t: SequentialTest): string {
+  return (
+    `always-valid evidence E = ${t.eValue < 1e6 ? t.eValue.toFixed(1) : t.eValue.toExponential(1)} ` +
+    `(anytime p = ${t.anytimeP < 1e-4 ? t.anytimeP.toExponential(1) : t.anytimeP.toFixed(4)}, ` +
+    `bar 1/α = ${(1 / t.alpha).toFixed(1)}; it took ${(100 * t.observedShare).toFixed(1)}% of the ` +
+    `pair's ${t.candidateConversions + t.referenceConversions} conversions against the ` +
+    `${(100 * t.boundaryShare).toFixed(1)}% the boundary hypothesis predicts)`
+  );
 }
 
 function verdictFor(v: VerdictInput): { verdict: Verdict; reason: string } {
@@ -590,16 +715,38 @@ function verdictFor(v: VerdictInput): { verdict: Verdict; reason: string } {
         `Nothing to compare it against, so no verdict is available — that is not a judgement ` +
         `about the ad.`
       : `no gate-passing ad was available to compare against. Not a judgement about this ad.`;
-  } else if (comparison.pWorseByThreshold >= thresholds.killAt) {
+  } else if (comparison.pWorseByThreshold >= thresholds.killAt && v.sequentialWorse?.rejected === true) {
     verdict = 'KILL';
     reason =
       `P(CPA > ${(1 + comparison.thresholdOfCaring).toFixed(2)} × ${against}) = ` +
-      `${pct(comparison.pWorseByThreshold)} ≥ ${pct(thresholds.killAt)}` +
+      `${pct(comparison.pWorseByThreshold)} ≥ ${pct(thresholds.killAt)}, and the always-valid ` +
+      `sequential test agrees at α = ${thresholds.sequentialAlpha}: ${evidence(v.sequentialWorse)}` +
       (comparison.expectedLossKeepMinor !== undefined
-        ? `; keeping it costs ~${comparison.expectedLossKeepMinor.toFixed(0)} minor units per conversion`
+        ? `. Keeping it costs ~${comparison.expectedLossKeepMinor.toFixed(0)} minor units per conversion`
         : '') +
       `. Posterior over ${fit.conversions} conversions and ${fit.effectiveSpendMinor.toFixed(0)} ` +
       `minor units of completeness-corrected exposure (raw spend ${fit.spendMinor}).`;
+  } else if (comparison.pWorseByThreshold >= thresholds.killAt && v.sequentialWorse !== undefined) {
+    // The branch that stops the engine destroying good creative. The single-look posterior
+    // has crossed, but this ad is looked at again every day, and a single-look bar asked
+    // repeatedly is not the test it appears to be — the family-wise error compounds with
+    // time even when nothing changes. The sequential statistic is the one that is allowed to
+    // be asked as often as we like, and it has not crossed.
+    verdict = 'HOLD';
+    reason =
+      `P(CPA > ${(1 + comparison.thresholdOfCaring).toFixed(2)} × ${against}) = ` +
+      `${pct(comparison.pWorseByThreshold)} ≥ ${pct(thresholds.killAt)} on a SINGLE look, but this ` +
+      `ad is judged again every day and that bar does not survive being asked repeatedly. The ` +
+      `always-valid test has NOT crossed: ${evidence(v.sequentialWorse)}. Keeping it: the ` +
+      `evidence is real but it is not yet enough to survive the number of times we have asked.`;
+  } else if (comparison.pBetter >= thresholds.scaleAt && v.sequentialBetter?.rejected !== true) {
+    verdict = 'HOLD';
+    reason =
+      `P(better than ${against}) = ${pct(comparison.pBetter)} ≥ ${pct(thresholds.scaleAt)} on a ` +
+      `single look, but the always-valid test has not crossed` +
+      (v.sequentialBetter !== undefined ? `: ${evidence(v.sequentialBetter)}` : '') +
+      `. Spending more on a lead this thin is how a slate of identical creatives ends up with ` +
+      `one of them on triple the budget for no reason.`;
   } else if (comparison.pBetter >= thresholds.scaleAt) {
     // SCALE is the one verdict that spends MORE money, and every statistic above it is
     // RELATIVE: a slate in which every ad loses money still has a leader, and "better than
@@ -621,7 +768,9 @@ function verdictFor(v: VerdictInput): { verdict: Verdict; reason: string } {
       verdict = 'SCALE';
       reason =
         `P(better than ${against}) = ${pct(comparison.pBetter)} ≥ ${pct(thresholds.scaleAt)} ` +
-        `over ${fit.conversions} conversions, and it is not confidently worse than the brand's ` +
+        `over ${fit.conversions} conversions` +
+        (v.sequentialBetter !== undefined ? `, confirmed sequentially — ${evidence(v.sequentialBetter)}` : '') +
+        `, and it is not confidently worse than the brand's ` +
         `target CPA of ${v.targetCpaMinor} (P(CPA > ${scaleCeilingMinor.toFixed(0)}) = ` +
         `${pct(pWorseThanTarget)}).`;
     }
@@ -629,10 +778,11 @@ function verdictFor(v: VerdictInput): { verdict: Verdict; reason: string } {
     verdict = 'EQUIVALENT';
     reason =
       `${pct(comparison.ropeMass)} of the posterior lies within ±${pct(comparison.thresholdOfCaring)} ` +
-      `of ${against}'s CPA, and the comparison is powered ` +
-      `(${power.candidateConversions} and ${power.referenceConversions} conversions vs ` +
-      `${power.requiredPerArm.toFixed(0)} required per arm). Not distinguishable from ` +
-      `${against} — stop re-litigating it.`;
+      `of ${against}'s CPA, and the comparison can actually resolve that gap: ` +
+      `${power.candidateConversions} and ${power.referenceConversions} conversions resolve ` +
+      `${pct(power.detectableEffect)}, inside the ${pct(power.thresholdOfCaring)} threshold of ` +
+      `caring (${power.requiredPerArm.toFixed(0)}/arm is the same budget at EQUAL exposure, which ` +
+      `these arms do not have). Not distinguishable from ${against} — stop re-litigating it.`;
   } else if (comparison.ropeMass >= thresholds.equivalentAt) {
     // The trap this branch exists to block: with a weak prior and little data, two ads
     // both sit near the target CPA, the ROPE fills up, and the system declares them
@@ -641,9 +791,8 @@ function verdictFor(v: VerdictInput): { verdict: Verdict; reason: string } {
     reason =
       `${pct(comparison.ropeMass)} of the posterior is inside the equivalence region, but the ` +
       `comparison is NOT powered: ${power.candidateConversions} and ` +
-      `${power.referenceConversions} conversions against ${power.requiredPerArm.toFixed(0)} ` +
-      `required per arm to resolve ±${pct(comparison.thresholdOfCaring)}. The smallest gap ` +
-      `these arms can resolve today is ${pct(power.detectableEffect)}. Cannot tell yet.`;
+      `${power.referenceConversions} conversions resolve only ${pct(power.detectableEffect)}, ` +
+      `outside the ±${pct(comparison.thresholdOfCaring)} we care about. Cannot tell yet.`;
   } else {
     verdict = 'HOLD';
     reason =

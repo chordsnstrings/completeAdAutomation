@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 
 import type {
   AnglePerformance,
+  AssetType,
   AwarenessStage,
   CaptionStyle,
   CreativeGenome,
@@ -1032,6 +1033,148 @@ export async function run(): Promise<VerifyReport> {
       'musicPresence !== "none" and MOTION_ONLY_CAPTION_STYLES, closes it. Note durationBucket must stay OUT of that rule: ' +
       'TEMPLATE_SPECS.offer_led pairs defaultAssetType "product_image_with_text" with durationBuckets ["static","s3_8"], so a still held for 3-8s is endorsed by the corpus.');
     return `Still-image asset types cannot be tagged with cuts, music or motion captions.`;
+  });
+
+  check('medium_coherence_holds_over_the_whole_asset_x_motion_subspace', () => {
+    // The check above is a spot check on three asset types. This one is the audit: every
+    // asset type against every pacing, music, caption style and duration bucket, judged
+    // against an oracle written HERE rather than read out of the module, so the module
+    // agreeing with itself is not what is being measured.
+    //
+    // The oracle is the §4.5 `medium` field (video|static|carousel|gif) that this vector
+    // does not store. Two capabilities follow from it and everything else is derived:
+    // can the artefact CHANGE over time (cuts, captions that unfold), and does it carry
+    // an AUDIO TRACK. `either` is the honest answer for the tiers that ship both ways;
+    // no rule may fire on those, because a false refusal costs more than a missed one.
+    const EXPECTED_MEDIUM: Readonly<Record<AssetType, 'still' | 'motion' | 'silent_motion' | 'multi_card' | 'either'>> = {
+      text_only: 'either',
+      product_image_with_text: 'still',
+      lifestyle_product_image: 'still',
+      ugc: 'either',
+      high_production: 'either',
+      gif: 'silent_motion',
+      illustration: 'still',
+      ugc_mashup: 'either',
+      lifestyle_product_image_with_text: 'still',
+      lifestyle_image_with_text: 'still',
+      lifestyle_image: 'still',
+      hybrid: 'either',
+      product_image: 'still',
+      animation: 'motion',
+      carousel: 'multi_card',
+    };
+    for (const a of G.ASSET_TYPES) {
+      eq(G.mediumForAssetType(a), EXPECTED_MEDIUM[a], `mediumForAssetType("${a}")`);
+    }
+    eq(Object.keys(EXPECTED_MEDIUM).length, G.ASSET_TYPES.length,
+      'the oracle and the codebook disagree on how many asset types exist — a new one would slip through unclassified');
+
+    const MOTION_CAPTIONS = new Set<CaptionStyle>(['platform_auto', 'burned_in_word_by_word', 'burned_in_karaoke']);
+    const MEDIUM_CODES = new Set([
+      'static_with_pacing', 'static_with_music', 'static_with_motion_captions',
+      'motion_asset_with_static_duration', 'silent_asset_with_music', 'silent_asset_with_platform_captions',
+    ]);
+
+    // A base whose every other attribute is on-book, so the only errors a cell can raise
+    // are medium ones: no person required, nothing synthetic, an offer present.
+    const base = genomeForCell({ template: 'problem_solution_demo', mechanic: 'borrowed_enemy', hookTactic: 'explainer' }, 'wallet-bulge');
+
+    const expectedFor = (g: CreativeGenome): string[] => {
+      const medium = EXPECTED_MEDIUM[g.assetType];
+      const moving = medium === 'motion' || medium === 'silent_motion';
+      const still = !moving && (medium === 'still' || g.durationBucket === 'static');
+      const out: string[] = [];
+      if (moving && g.durationBucket === 'static') out.push('motion_asset_with_static_duration');
+      if (still) {
+        if (g.pacing !== 'static') out.push('static_with_pacing');
+        if (g.musicPresence !== 'none') out.push('static_with_music');
+        if (MOTION_CAPTIONS.has(g.captionStyle)) out.push('static_with_motion_captions');
+      } else if (medium === 'silent_motion') {
+        if (g.musicPresence !== 'none') out.push('silent_asset_with_music');
+        if (g.captionStyle === 'platform_auto') out.push('silent_asset_with_platform_captions');
+      }
+      return out.sort();
+    };
+
+    let cells = 0;
+    let refused = 0;
+    let clean = 0;
+    const disagreements: string[] = [];
+    const strayCodes = new Set<string>();
+    for (const assetType of G.ASSET_TYPES) {
+      for (const pacing of G.PACINGS) {
+        for (const musicPresence of G.MUSIC_PRESENCES) {
+          for (const captionStyle of G.CAPTION_STYLES) {
+            for (const durationBucket of G.DURATION_BUCKETS) {
+              const g: CreativeGenome = { ...base, assetType, spokespersonType: 'none', pacing, musicPresence, captionStyle, durationBucket };
+              cells++;
+              const r = G.validateGenome(g);
+              const actual = errCodes(r);
+              for (const c of actual) if (!MEDIUM_CODES.has(c)) strayCodes.add(c);
+              const expected = expectedFor(g);
+              if (actual.join(',') !== expected.join(',')) {
+                if (disagreements.length < 4) {
+                  disagreements.push(`${assetType}/${durationBucket}/${pacing}/${musicPresence}/${captionStyle}: got [${actual.join(',')}] want [${expected.join(',')}]`);
+                }
+              }
+              if (actual.length > 0) refused++; else clean++;
+              // The vector still has to survive its only channel whether or not it is
+              // coherent: encoding is for logs, validation is for spending money.
+              must(sameGenome(G.decodeGenome(G.encodeGenome(g)), g), `${G.describeGenome(g)} did not round-trip after the coherence change`);
+            }
+          }
+        }
+      }
+    }
+    must(disagreements.length === 0, `${disagreements.length} cells disagree with the medium oracle: ${disagreements.join(' | ')}`);
+    must(strayCodes.size === 0, `an unrelated rule fired inside the medium sweep: ${[...strayCodes].join(', ')}`);
+    must(clean > 0 && refused > 0, 'the sweep is degenerate — it either refused everything or nothing');
+
+    // The two directions of the same rule, stated separately so neither can rot alone.
+    const still: CreativeGenome = { ...base, assetType: 'product_image', spokespersonType: 'none', durationBucket: 's30_60', pacing: 'rapid', musicPresence: 'trending', captionStyle: 'burned_in_karaoke' };
+    eq(errCodes(G.validateGenome(still)).join(','), 'static_with_motion_captions,static_with_music,static_with_pacing',
+      'a still asset with a non-static duration is not caught by all three motion rules');
+    const moving: CreativeGenome = { ...base, assetType: 'animation', spokespersonType: 'none', durationBucket: 'static', pacing: 'static', musicPresence: 'none', captionStyle: 'burned_in_static' };
+    eq(errCodes(G.validateGenome(moving)).join(','), 'motion_asset_with_static_duration',
+      'a moving asset declared static in duration was accepted');
+    const silent: CreativeGenome = { ...base, assetType: 'gif', spokespersonType: 'none', durationBucket: 's6_15', pacing: 'fast', musicPresence: 'trending', captionStyle: 'platform_auto' };
+    eq(errCodes(G.validateGenome(silent)).join(','), 'silent_asset_with_music,silent_asset_with_platform_captions',
+      'a GIF was allowed a soundtrack and auto-captions it has no audio track to produce');
+    // And the endorsed still-held-on-screen case must survive: §5.7 pairs offer_led's
+    // product_image_with_text default with durationBuckets ["static","s3_8"].
+    const heldStill: CreativeGenome = { ...base, template: 'offer_led', mechanic: 'this_and_a', hookTactic: 'offer_only', awarenessStage: 'most_aware', assetType: 'product_image_with_text', spokespersonType: 'none', durationBucket: 's3_8', pacing: 'static', musicPresence: 'none', captionStyle: 'burned_in_static' };
+    eq(errCodes(G.validateGenome(heldStill)).length, 0,
+      `a still held on screen for 3-8s — endorsed by TEMPLATE_SPECS.offer_led — was refused: [${errCodes(G.validateGenome(heldStill)).join(', ')}]`);
+
+    return `${cells} (assetType x pacing x music x captionStyle x durationBucket) cells judged against an independently written medium oracle: ` +
+      `${refused} refused, ${clean} clean, zero disagreements, and no unrelated rule fired. ` +
+      `Both directions hold — a still asset carrying cuts/music/motion captions, a motion asset declared static, and a GIF given a soundtrack or platform captions are all errors — ` +
+      `while the ambiguous tiers (text_only, ugc, high_production, ugc_mashup, hybrid, carousel) are never refused and the corpus-endorsed "still held for 3-8s" still builds. ` +
+      `All ${cells} vectors, coherent or not, still round-trip exactly, so the coherence rules changed no part of the encoded contract.`;
+  });
+
+  check('a_button_that_promises_an_offer_needs_an_offer', () => {
+    // The offer rules already covered the template (T8's gate) and the hook tactic. The
+    // third place an offer is asserted is Meta's own button copy, which is the one the
+    // user actually clicks — and it was unguarded.
+    const base = genomeForCell({ template: 'problem_solution_demo', mechanic: 'borrowed_enemy', hookTactic: 'explainer' }, 'wallet-bulge');
+    const bad: CreativeGenome = { ...base, cta: 'GET_OFFER', offerType: 'none' };
+    must(errCodes(G.validateGenome(bad)).includes('offer_cta_without_offer'),
+      `"Get offer" over offerType none was accepted: [${errCodes(G.validateGenome(bad)).join(', ')}]`);
+    // Every other CTA asserts a path, not a deal, so none of them may be refused on this
+    // rule — a false refusal here would delete most of the CTA dimension from the corpus.
+    const overRefused: string[] = [];
+    for (const cta of G.GENOME_CTAS) {
+      if (cta === 'GET_OFFER') continue;
+      const r = G.validateGenome({ ...base, cta, offerType: 'none' });
+      if (errCodes(r).includes('offer_cta_without_offer')) overRefused.push(cta);
+    }
+    must(overRefused.length === 0, `the offer-CTA rule over-reaches to: ${overRefused.join(', ')}`);
+    // And with an offer present, every CTA is legal.
+    for (const cta of G.GENOME_CTAS) {
+      eq(G.validateGenome({ ...base, cta, offerType: 'promo' }).errors.length, 0, `cta "${cta}" was refused despite an offer being present`);
+    }
+    return `"Get offer" with offerType "none" is an error; the other ${G.GENOME_CTAS.length - 1} CTAs assert a path rather than a deal and are untouched by the rule, and every CTA validates once an offer exists.`;
   });
 
   check('ad_name_failure_names_the_actual_cause', () => {

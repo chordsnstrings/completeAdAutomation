@@ -1249,11 +1249,35 @@ export function buildAssFile(
 }
 
 /**
- * Escapes a value for use inside a filtergraph option. Colons matter (Windows drive
- * letters, and `ass=filename=` itself), and so do the graph separators.
+ * Escapes a value for use inside a filtergraph option.
+ *
+ * ffmpeg unescapes a filter argument at TWO nested levels, innermost first
+ * (ffmpeg-filters(1) "Notes on filtergraph escaping"):
+ *
+ *   level 1 — the filter OPTION parser, where `\`, `'` and the option separator `:`
+ *             are special;
+ *   level 2 — the FILTERGRAPH parser, where `\`, `'` and the filter/graph separators
+ *             `,` `;` `[` `]` are special.
+ *
+ * A literal character therefore has to be escaped for level 1 and the RESULT escaped
+ * again for level 2. One pass over the union of both character sets is wrong, because it
+ * emits a single backslash for a character that needs escaping twice. [MEASURED here,
+ * ffmpeg 6.1.1, `ass=filename=<path>` against a real render] the previous single-pass
+ * form `value.replace(/([\\':,;\[\]])/g, '\\$1')` produced a filtergraph ffmpeg REJECTS
+ * ("Error opening output files: Invalid argument") for every path containing `:`, `'`
+ * or `\` — a render that simply fails, and `:` is not exotic: it appears in Windows
+ * drive letters and in any path built from a timestamp. `,` `;` `[` `]` are graph-level
+ * only and one backslash was always correct for them, which is why the bug survived.
+ *
+ * Emitted forms, all verified through a live `ass=filename=` graph:
+ *   `:` -> `\\:`   `'` -> `\\\'`   `\` -> `\\\\`   `,` `;` `[` `]` -> `\,` `\;` `\[` `\]`
  */
 export function escapeFilterArgument(value: string): string {
-  return value.replace(/([\\':,;\[\]])/g, '\\$1');
+  // Level 1: the filter-option parser.
+  const optionLevel = value.replace(/([\\':])/g, '\\$1');
+  // Level 2: the filtergraph parser, applied to the level-1 output (so the backslashes
+  // introduced above are themselves escaped — that is the whole point).
+  return optionLevel.replace(/([\\',;[\]])/g, '\\$1');
 }
 
 /**

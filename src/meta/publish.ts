@@ -1018,7 +1018,10 @@ interface Prepared {
   categories: readonly SpecialAdCategory[];
   categoryCountries: readonly string[];
   dsa: { payor: string; beneficiary: string } | undefined;
+  /** The http(s) click-through URL, if this archetype has one. */
   link: string | undefined;
+  /** The whole `call_to_action.value` object, whatever shape this archetype's destination takes. */
+  ctaValue: Record<string, string>;
   warnings: string[];
 }
 
@@ -1125,8 +1128,8 @@ function prepare(req: PublishRequest): Prepared {
     );
   }
 
-  // --- destination link ------------------------------------------------------
-  const link = resolveLink(req, warnings);
+  // --- destination -----------------------------------------------------------
+  const { link, ctaValue } = resolveDestination(req, warnings);
 
   // --- names -----------------------------------------------------------------
   const nameFor = (level: ObjectLevel): string =>
@@ -1138,12 +1141,12 @@ function prepare(req: PublishRequest): Prepared {
     creative: nameFor('creative'),
   };
 
-  validateCreative(req, spec, link, warnings);
+  validateCreative(req, spec, ctaValue, warnings);
   validatePromotedObject(spec, destination);
 
   return {
     req, config, spec, account, offset, options, budgetLevel, bidStrategy, names, targeting,
-    categories, categoryCountries, dsa, link, warnings,
+    categories, categoryCountries, dsa, link, ctaValue, warnings,
   };
 }
 
@@ -1380,44 +1383,172 @@ function parseTime(field: string, value: string): number {
 }
 
 /**
- * Whether this archetype's creative carries a click URL at all.
+ * Where this archetype's ad actually sends the person who taps it.
  *
- * An Instant Form IS the destination — there is nowhere to click through to — and a
- * catalogue ad derives its link per product from the feed, so neither can supply one.
- * Everything else must, because `video_data` has no `link` field of its own.
+ * Getting this wrong made a Brand that `domain/brand.ts` validates as GOOD unpublishable:
+ * the three on-Meta destinations carry no website URL by design, and demanding one from
+ * them refused twelve of thirty-six object builds. The destination of a click-to-Messenger,
+ * click-to-WhatsApp or click-to-call ad is a Meta surface, declared on the AD SET as
+ * `destination_type` plus `promoted_object.page_id` (dossier §4.2, §4.3) — there is no
+ * second URL for an operator to supply, which is exactly why brand.ts asks for none.
+ *
+ *  - `website`      — a real click URL is required. `video_data` has NO `link` field of its
+ *                     own, so it lives only in `call_to_action.value.link` (§4.3 of
+ *                     meta-video-creative.md, "Gotcha #9").
+ *  - `instant_form` — the form IS the destination; `lead_gen_form_id`, no URL.
+ *  - `on_meta`      — Messenger / WhatsApp / the dialer. See ON_META_DESTINATION.
+ *  - `catalog`      — the per-product link comes from the feed.
  */
-function linkRequirement(archetype: ConversionArchetype): 'required' | 'optional' | 'forbidden' {
-  if (archetype === 'instant_form_lead') return 'forbidden';
-  if (archetype === 'catalog_sales') return 'optional';
-  return 'required';
-}
+type DestinationKind = 'website' | 'instant_form' | 'on_meta' | 'catalog';
 
-function resolveLink(req: PublishRequest, warnings: string[]): string | undefined {
-  const { config, creative } = req;
+const DESTINATION_KIND: Readonly<Record<ConversionArchetype, DestinationKind>> = {
+  website_purchase: 'website',
+  website_lead: 'website',
   // An app-install ad clicks through to the store listing, which is already declared on
   // the destination as object_store_url; there is no second URL to ask the caller for.
-  const link = creative.link ?? config.destination.url ?? config.destination.objectStoreUrl;
-  const requirement = linkRequirement(config.spec.archetype);
+  app_install: 'website',
+  traffic: 'website',
+  instant_form_lead: 'instant_form',
+  messenger_lead: 'on_meta',
+  whatsapp_conversation: 'on_meta',
+  phone_call: 'on_meta',
+  catalog_sales: 'catalog',
+};
 
-  if (requirement === 'forbidden') {
-    if (creative.leadGenFormId === undefined && config.destination.leadFormId === undefined) {
+/**
+ * `call_to_action.value.app_destination` for the two messaging surfaces.
+ *
+ * `app_destination` is a documented field on `AdCreativeLinkDataCallToActionValue` — the
+ * same value type `video_data.call_to_action` uses — but the corpus never enumerates its
+ * enum and carries no worked click-to-message example (gaps-and-missing-pieces.md still
+ * lists `click-to-message.md` as a dossier that was never written). So the field is
+ * documented, the value is not: it is emitted with an explicit UNVERIFIED warning rather
+ * than quietly assumed, and the ad set's `destination_type` names the surface regardless.
+ */
+const ON_META_APP_DESTINATION: Partial<Record<ConversionArchetype, string>> = {
+  messenger_lead: 'MESSENGER',
+  whatsapp_conversation: 'WHATSAPP',
+};
+
+/** E.164: a leading +, a non-zero country code, at most 15 digits in total. */
+const E164 = /^\+[1-9]\d{1,14}$/;
+
+/**
+ * The resolved click destination.
+ *
+ * `link` is deliberately narrower than `ctaValue.link`: it is the http(s) CLICK-THROUGH
+ * URL and nothing else, because it is what `conversion_domain` is derived from and what
+ * decides whether `url_tags` mean anything. A `tel:` destination has neither a registrable
+ * domain nor a query string, so it lives in `ctaValue` only.
+ */
+interface ResolvedDestination {
+  link: string | undefined;
+  ctaValue: Record<string, string>;
+}
+
+function resolveDestination(req: PublishRequest, warnings: string[]): ResolvedDestination {
+  const { config, creative } = req;
+  const archetype = config.spec.archetype;
+  const kind = DESTINATION_KIND[archetype];
+  const ctaValue: Record<string, string> = {};
+
+  if (kind === 'instant_form') {
+    const formId = creative.leadGenFormId ?? config.destination.leadFormId;
+    if (formId === undefined) {
       fail(
         'object_story_spec.video_data.call_to_action.value.lead_gen_form_id',
         'instant_form_lead needs a lead form id; the form is the destination and there is no URL to fall back on.',
       );
     }
-    return undefined;
+    ctaValue['lead_gen_form_id'] = formId;
+    return { link: undefined, ctaValue };
   }
 
-  if (link === undefined) {
-    if (requirement === 'optional') return undefined;
+  if (kind === 'on_meta') {
+    // No `destination.url` fallback on purpose: under destination_type=MESSENGER/WHATSAPP/
+    // PHONE_CALL the docs require that "creative must have that surface as its destination"
+    // (§4.2), so silently clicking through to a website would contradict the ad set.
+    const link = creative.link !== undefined ? validateClickUrl(creative.link, warnings) : undefined;
+    if (link !== undefined) ctaValue['link'] = link;
+
+    const appDestination = ON_META_APP_DESTINATION[archetype];
+    if (appDestination !== undefined) ctaValue['app_destination'] = appDestination;
+
+    if (archetype === 'phone_call') resolvePhoneDestination(config, link, ctaValue, warnings);
+
+    warnings.push(
+      `archetype ${archetype}: the click-to-message / click-to-call creative recipe is UNVERIFIED. The corpus ` +
+        `documents the call_to_action.value fields (link, app_destination) and destination_type=` +
+        `${config.spec.destinationType ?? 'UNDEFINED'}, but carries no worked example — gaps-and-missing-pieces.md ` +
+        `lists click-to-message.md as a missing dossier. This builder emits ` +
+        `call_to_action.value=${JSON.stringify(ctaValue)} and relies on the ad set's destination_type plus ` +
+        `promoted_object.page_id to name the surface. Confirm it on the first live create.`,
+    );
+    return { link, ctaValue };
+  }
+
+  const raw = creative.link ?? config.destination.url ?? config.destination.objectStoreUrl;
+  if (raw === undefined) {
+    if (kind === 'catalog') return { link: undefined, ctaValue };
     fail(
       'object_story_spec.video_data.call_to_action.value.link',
-      `archetype ${config.spec.archetype} needs a destination URL. video_data has NO link field of its own — ` +
+      `archetype ${archetype} needs a destination URL. video_data has NO link field of its own — ` +
         `unlike link_data, the URL lives only inside call_to_action.value.link.`,
     );
   }
+  const link = validateClickUrl(raw, warnings);
+  ctaValue['link'] = link;
+  return { link, ctaValue };
+}
 
+/**
+ * A click-to-call ad's number comes off the brand, where brand.ts already demands it.
+ *
+ * It used to be read by nobody: `destination.phoneNumber` is REQUIRED by brand.ts for
+ * phone_call and was never looked at here, so the one field the operator had to fill in
+ * for this archetype had no effect on anything published.
+ */
+function resolvePhoneDestination(
+  config: ResolvedAdConfig,
+  link: string | undefined,
+  ctaValue: Record<string, string>,
+  warnings: string[],
+): void {
+  const phone = config.destination.phoneNumber;
+  if (phone === undefined || phone.trim() === '') {
+    fail(
+      'object_story_spec.video_data.call_to_action.value.link',
+      'phone_call needs destination.phoneNumber — the dialer is the destination and there is no URL to fall ' +
+        'back on. brand.ts requires the field; it must reach the creative.',
+    );
+  }
+  const number = phone.trim();
+  if (!E164.test(number)) {
+    fail(
+      'object_story_spec.video_data.call_to_action.value.link',
+      `destination.phoneNumber "${phone}" is not E.164 (a leading +, country code, at most 15 digits). A ` +
+        `locally-formatted number dials nothing for an out-of-country viewer, and Meta reports it as a generic ` +
+        `code 100.`,
+    );
+  }
+  if (link !== undefined) {
+    warnings.push(
+      `phone_call: creative.link "${link}" overrides destination.phoneNumber ${number} in ` +
+        `call_to_action.value.link. Under destination_type=PHONE_CALL the creative is expected to dial, not to ` +
+        `click through — drop the link unless you know why it is there.`,
+    );
+    return;
+  }
+  // The CTA-value reference lists no phone-number field: `link` is the only destination
+  // slot, and `tel:` is the standard URI scheme for it. UNVERIFIED for this surface — the
+  // on_meta warning above says so — but a CTA with an EMPTY value is documented to break
+  // ("for a video ad with type NO_BUTTON you still must supply call_to_action.value.link"),
+  // so emitting nothing at all is the worse of the two guesses.
+  ctaValue['link'] = `tel:${number}`;
+}
+
+/** Every rule a click-through URL has to satisfy before it can be a CTA destination. */
+function validateClickUrl(link: string, warnings: string[]): string {
   let url: URL;
   try {
     url = new URL(link);
@@ -1425,7 +1556,11 @@ function resolveLink(req: PublishRequest, warnings: string[]): string | undefine
     return fail('call_to_action.value.link', `"${link}" is not an absolute URL.`);
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    fail('call_to_action.value.link', `"${link}" must be http or https.`);
+    fail(
+      'call_to_action.value.link',
+      `"${link}" must be http or https. A phone destination is declared as destination.phoneNumber on the ` +
+        `brand, where it is validated as E.164, not hand-written as a tel: URI here.`,
+    );
   }
   if (url.hash !== '') {
     // Meta appends url_tags with '&'; on a URL with a fragment the params can land after
@@ -1448,7 +1583,7 @@ function resolveLink(req: PublishRequest, warnings: string[]): string | undefine
 function validateCreative(
   req: PublishRequest,
   spec: ArchetypeSpec,
-  link: string | undefined,
+  ctaValue: Record<string, string>,
   warnings: string[],
 ): void {
   const c = req.creative;
@@ -1547,8 +1682,16 @@ function validateCreative(
     );
   }
 
-  if (link === undefined && linkRequirement(spec.archetype) === 'required') {
-    fail('call_to_action.value.link', 'is required for this archetype.');
+  // Whatever the archetype's destination is — a URL, a form id, a Meta surface — the CTA
+  // has to name it. An EMPTY call_to_action.value is the documented failure the corpus
+  // calls out: "for a video ad with type NO_BUTTON you still must supply
+  // call_to_action.value.link ... This costs people a day."
+  if (Object.keys(ctaValue).length === 0 && DESTINATION_KIND[spec.archetype] !== 'catalog') {
+    fail(
+      'object_story_spec.video_data.call_to_action.value',
+      `archetype ${spec.archetype} produced an empty call_to_action.value, so the ad would have no destination ` +
+        `at all. video_data has no link field of its own — the destination exists only here.`,
+    );
   }
 }
 
@@ -1638,8 +1781,11 @@ export function buildCampaignRequest(req: PublishRequest): BuiltRequest {
       put(params, 'daily_budget', config.dailyBudgetMinor);
     }
     // bid_strategy belongs wherever the budget is; setting it in both places is a code 100.
+    // bid_AMOUNT does NOT follow it: the campaign create field table (dossier §3) does not
+    // list bid_amount at all, and §6.4 documents it only on the ad set. Emitting it here
+    // is how a COST_CAP campaign silently loses its cap — money leaking quietly rather
+    // than loudly — so the ad set builder owns it under both budget levels.
     put(params, 'bid_strategy', p.bidStrategy);
-    put(params, 'bid_amount', options.bidAmountMinor);
   } else {
     put(params, 'is_adset_budget_sharing_enabled', options.adSetBudgetSharing);
   }
@@ -1687,8 +1833,13 @@ export function buildAdSetRequest(req: PublishRequest, refs: { campaignId: strin
       put(params, 'daily_budget', config.dailyBudgetMinor);
     }
     put(params, 'bid_strategy', p.bidStrategy);
-    put(params, 'bid_amount', options.bidAmountMinor);
   }
+
+  // Unconditional, under BOTH budget levels: §12 moves bid_STRATEGY to the campaign under
+  // CBO and nothing else. bid_amount is an ad set field (§6.4, "for IMPRESSION/REACH
+  // billing: per 1,000 occurrences"), absent from the campaign create table entirely, and
+  // it is deprecated at the AD level (§9) — the ad set is the only node that holds it.
+  put(params, 'bid_amount', options.bidAmountMinor);
 
   put(params, 'start_time', options.startTime);
   put(params, 'end_time', options.endTime);
@@ -1780,12 +1931,9 @@ export function buildCreativeRequest(req: PublishRequest): BuiltRequest {
     );
   }
 
-  const value: Record<string, unknown> = {};
-  if (p.link !== undefined) value['link'] = p.link;
-  const formId = c.leadGenFormId ?? config.destination.leadFormId;
-  if (spec.archetype === 'instant_form_lead' && formId !== undefined) {
-    value['lead_gen_form_id'] = formId;
-  }
+  // Built once in prepare(), so the CTA destination the validator checked is byte-for-byte
+  // the one that goes on the wire.
+  const value: Record<string, unknown> = { ...p.ctaValue };
 
   const videoData: Record<string, unknown> = {
     video_id: c.videoId,
@@ -1821,7 +1969,12 @@ export function buildCreativeRequest(req: PublishRequest): BuiltRequest {
   }
   putJson(params, 'degrees_of_freedom_spec', { creative_features_spec: features });
 
-  const urlTags = options.urlTags ?? (p.link !== undefined ? DEFAULT_URL_TAGS : undefined);
+  // Only a website click-through has a query string worth decorating. An on-Meta
+  // destination (m.me, a WhatsApp thread, the dialer) has nowhere for utm parameters to
+  // land and no analytics to read them back, so they are not defaulted onto one — an
+  // explicit options.urlTags still wins if the caller knows otherwise.
+  const taggable = DESTINATION_KIND[spec.archetype] !== 'on_meta' && p.link !== undefined;
+  const urlTags = options.urlTags ?? (taggable ? DEFAULT_URL_TAGS : undefined);
   if (urlTags !== undefined && urlTags !== '') {
     if (urlTags.startsWith('?') || urlTags.startsWith('&')) {
       fail('url_tags', `"${urlTags}" must not start with ? or & — Meta supplies the separator.`);

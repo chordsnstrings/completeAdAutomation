@@ -85,6 +85,16 @@ export const SHOPS_ADS_LEARNING = { website: 17, meta: 5 } as const;
 /** With a cost-per-result goal bid strategy, daily budget must be >= 5x the goal. */
 export const COST_GOAL_BUDGET_MULTIPLE = 5;
 
+/**
+ * Cost per primary conversion above which the three-stage template is not offered at all.
+ *
+ * From the selection function in the research: `if b >= 500 and cpa <= 40: FULL_THREE_STAGE`. It is
+ * a separate gate from the budget arithmetic and it fires earlier: at a $60 CPA the bottom stage
+ * needs $428/day of its own, so a $500/day account would be offered a template the arithmetic then
+ * refuses. Checking the CPA first means the account is never shown the three-stage structure at all.
+ */
+export const FULL_THREE_STAGE_MAX_CPA_MAJOR = 40;
+
 // ---------------------------------------------------------------------------
 // The optimisation-event ladder
 // ---------------------------------------------------------------------------
@@ -237,6 +247,62 @@ export function oneRungCheaper(
   const i = ladder.indexOf(rung);
   if (i < 0 || i + 1 >= ladder.length) return rung;
   return ladder[i + 1] ?? rung;
+}
+
+/**
+ * All rungs ordered dearest/highest-intent first, ACROSS ladders.
+ *
+ * The per-archetype ladders are subsets of this order. It exists so a stage's
+ * `minimumRung` — which is written as an absolute rung, because a template is written once
+ * and runs for every archetype — can be compared with rungs that live on a different ladder.
+ */
+export const RUNG_ORDER: readonly OptimisationRung[] = [
+  'purchase',
+  'lead',
+  'app_install',
+  'add_to_cart',
+  'view_content',
+  'landing_page_view',
+  'thruplay',
+  'reach',
+];
+
+/**
+ * A stage's `minimumRung` expressed in the ladder the brand's archetype actually uses.
+ *
+ * Without this the guard silently evaporates for every non-purchase brand. `broad_plus_recapture`
+ * declares `minimumRung: 'view_content'` for its recapture stage, but a lead brand's ladder is
+ * `['lead', 'landing_page_view']` — `view_content` is not on it, `indexOf` returns -1, and the
+ * "is this stage below the rung at which it still does its job?" comparison quietly answers no
+ * for every budget. A $60/day lead brand then gets told to build a "Recapture" ad set optimising
+ * for landing page views, which is the exact structure this module's own documentation calls
+ * "not a recapture ad set, it is a second traffic ad set competing for the same auctions".
+ *
+ * The mapping is: the CHEAPEST rung on the brand's ladder that is still no cheaper than the
+ * declared minimum, falling back to the ladder's dearest rung when every rung on it is cheaper.
+ * So "no cheaper than view_content" becomes "no cheaper than a lead" on the lead ladder, which
+ * is the same intent, and becomes "landing page view" on the traffic ladder, where there is
+ * nothing dearer to ask for.
+ */
+export function effectiveMinimumRung(
+  minimum: OptimisationRung,
+  ladder: readonly OptimisationRung[],
+): OptimisationRung {
+  if (ladder.includes(minimum)) return minimum;
+  const minRank = RUNG_ORDER.indexOf(minimum);
+  let best: OptimisationRung | undefined;
+  let bestRank = -1;
+  if (minRank >= 0) {
+    for (const rung of ladder) {
+      const rank = RUNG_ORDER.indexOf(rung);
+      if (rank < 0 || rank > minRank) continue;
+      if (rank > bestRank) {
+        best = rung;
+        bestRank = rank;
+      }
+    }
+  }
+  return best ?? ladder[0] ?? minimum;
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,8 +1129,16 @@ export interface StageArithmetic {
   rungLabel: string;
   /** The rung it would have used with unlimited budget. */
   preferredRung: OptimisationRung;
-  /** The cheapest rung at which the stage still does its job. */
+  /** The cheapest rung at which the stage still does its job, ON THIS BRAND'S LADDER. */
   minimumRung: OptimisationRung;
+  /** What the template declares, before it is mapped onto this brand's ladder. */
+  declaredMinimumRung: OptimisationRung;
+  /**
+   * True when the budget would have pushed this stage below `minimumRung`. The stage is then
+   * held AT its minimum and reported as failing, rather than silently delivered as something
+   * that is no longer the stage the plan asked for.
+   */
+  belowMinimum: boolean;
   laddered: boolean;
   eventLimited: boolean;
   costPerEventMajor: number | undefined;
@@ -1120,6 +1194,26 @@ function floorDailyFor(cpe: number | undefined): number | undefined {
 }
 
 /**
+ * The cost per optimisation event this module will use for a rung — the brand's own CPA, an
+ * observed override, or the tier-1 benchmark, in that order. `undefined` means the rung is not
+ * event-limited at all (Reach), so no learning-phase floor applies to it.
+ */
+export function costPerEventMajor(
+  rung: OptimisationRung,
+  input: FunnelBudgetInput,
+): number | undefined {
+  return cpeFor(rung, input);
+}
+
+/** 50/7 x the cost per event: the daily budget ONE ad set needs to exit the learning phase. */
+export function learningFloorDailyMajor(
+  rung: OptimisationRung,
+  input: FunnelBudgetInput,
+): number | undefined {
+  return floorDailyFor(cpeFor(rung, input));
+}
+
+/**
  * Decides whether a multi-stage funnel is appropriate AT ALL, and shows the arithmetic.
  *
  * For every stage: events needed per ad set per week (50) versus events the stage's share
@@ -1146,7 +1240,11 @@ export function assessFunnelBudget(
   let anchor = primary;
   const ladderStage = template.stages.find((s) => s.rungMode === 'ladder');
   if (ladderStage !== undefined) {
-    anchor = chooseRungByLadder(primary, ladder, total * ladderStage.budgetShare, input);
+    const chosen = chooseRungByLadder(primary, ladder, total * ladderStage.budgetShare, input);
+    // Clamped, so the anchor is the rung that stage will actually run at rather than the one
+    // the budget alone would have picked. Otherwise a stage held at its minimum still drags
+    // every `one_cheaper` stage below it down with it.
+    anchor = dearerOf(chosen, effectiveMinimumRung(ladderStage.minimumRung, ladder), ladder);
   }
 
   const stages: StageArithmetic[] = template.stages.map((s) =>
@@ -1234,25 +1332,44 @@ function assessStage(s: FunnelStageTemplate, ctx: StageContext): StageArithmetic
   const stageDaily = round2(ctx.total * s.budgetShare);
 
   let preferred: OptimisationRung;
-  let rung: OptimisationRung;
+  let chosen: OptimisationRung;
   switch (s.rungMode) {
     case 'fixed':
       preferred = s.fixedRung ?? ctx.primary;
-      rung = preferred;
+      chosen = preferred;
       break;
     case 'primary':
       preferred = ctx.primary;
-      rung = preferred;
+      chosen = preferred;
       break;
     case 'one_cheaper':
       preferred = oneRungCheaper(ctx.anchor, ctx.ladder);
-      rung = preferred;
+      // "One rung cheaper than the main campaign" is where this stage STARTS, not where it is
+      // pinned. Stepping further down is Meta's own remedy for a learning-limited ad set, and
+      // the floor below which it stops being this stage is `minimumRung`, enforced below. Pinning
+      // it would refuse funnels that work: a brand with a $10 purchase CPA has an add-to-cart
+      // benchmark almost as dear as its purchases, so its recapture stage would be declared
+      // unaffordable at a budget that pays for ViewContent several times over.
+      chosen = chooseRungByLadder(preferred, ctx.ladder, stageDaily, ctx.input);
       break;
     case 'ladder':
       preferred = ctx.primary;
-      rung = chooseRungByLadder(ctx.primary, ctx.ladder, stageDaily, ctx.input);
+      chosen = chooseRungByLadder(ctx.primary, ctx.ladder, stageDaily, ctx.input);
       break;
   }
+
+  // The minimum, mapped onto this brand's ladder. A rung that is not on the ladder at all
+  // (ThruPlay, Reach) is off the scale rather than below it, so it is never "degraded".
+  const effectiveMin = effectiveMinimumRung(s.minimumRung, ctx.ladder);
+  const chosenIndex = ctx.ladder.indexOf(chosen);
+  const minIndex = ctx.ladder.indexOf(effectiveMin);
+  const belowMinimum = chosenIndex >= 0 && minIndex >= 0 && chosenIndex > minIndex;
+
+  // A stage is NEVER reported at a rung below the one at which it still does its job. It is
+  // held at its minimum and the arithmetic is stated there — which is also the only way
+  // `impliedTotalDailyMajor` can be right, because the budget this stage implies is the budget
+  // its MINIMUM rung needs, not the budget the too-cheap rung it was about to fall to needs.
+  const rung = belowMinimum ? effectiveMin : chosen;
 
   const cpe = cpeFor(rung, ctx.input);
   const floor = floorDailyFor(cpe);
@@ -1261,28 +1378,22 @@ function assessStage(s: FunnelStageTemplate, ctx: StageContext): StageArithmetic
   const exits = floor === undefined || stageDaily >= floor;
   const implied = floor === undefined ? undefined : round2(floor / s.budgetShare);
 
-  const rungIndex = ctx.ladder.indexOf(rung);
-  const minIndex = ctx.ladder.indexOf(s.minimumRung);
-  const degraded = rungIndex >= 0 && minIndex >= 0 && rungIndex > minIndex;
-
   let problem: string | undefined;
-  if (degraded) {
-    const minCpe = cpeFor(s.minimumRung, ctx.input);
-    const minFloor = floorDailyFor(minCpe);
-    const minAffordable = minCpe === undefined ? undefined : round1((stageDaily * 7) / minCpe);
+  if (belowMinimum && !exits) {
     problem =
-      `"${s.label}" would have to drop to ${RUNGS[rung].label} to clear the learning phase, but it stops ` +
-      `doing its job below ${RUNGS[s.minimumRung].label}. At ${RUNGS[s.minimumRung].label} ` +
-      `(${money(minCpe)} each) it needs ${money(minFloor)}/day of its own; ${pct(s.budgetShare)} of ` +
-      `${money(ctx.total)}/day gives it ${money(stageDaily)}/day, which buys ${minAffordable ?? '?'} events ` +
+      `"${s.label}" would have to drop to ${RUNGS[chosen].label} to clear the learning phase, but it stops ` +
+      `doing its job below ${RUNGS[effectiveMin].label}. At ${RUNGS[effectiveMin].label} ` +
+      `(${money(cpe)} each) it needs ${money(floor)}/day of its own; ${pct(s.budgetShare)} of ` +
+      `${money(ctx.total)}/day gives it ${money(stageDaily)}/day, which buys ${affordable ?? '?'} events ` +
       `a week against the ${LEARNING_PHASE_EVENTS_PER_WEEK} it needs — ` +
-      `${round1(LEARNING_PHASE_EVENTS_PER_WEEK - (minAffordable ?? 0))} short.`;
+      `${round1(Math.max(0, LEARNING_PHASE_EVENTS_PER_WEEK - (affordable ?? 0)))} short.`;
   } else if (!exits) {
     problem =
       `"${s.label}" cannot exit the learning phase. Optimising for ${RUNGS[rung].label} at ${money(cpe)} ` +
       `each, it needs ${money(floor)}/day; ${pct(s.budgetShare)} of ${money(ctx.total)}/day gives it ` +
       `${money(stageDaily)}/day, which buys ${affordable ?? '?'} events a week against the ` +
-      `${LEARNING_PHASE_EVENTS_PER_WEEK} it needs — ${round1(LEARNING_PHASE_EVENTS_PER_WEEK - (affordable ?? 0))} short.`;
+      `${LEARNING_PHASE_EVENTS_PER_WEEK} it needs — ` +
+      `${round1(Math.max(0, LEARNING_PHASE_EVENTS_PER_WEEK - (affordable ?? 0)))} short.`;
   }
 
   const arithmetic = eventLimited
@@ -1299,7 +1410,9 @@ function assessStage(s: FunnelStageTemplate, ctx: StageContext): StageArithmetic
     rung,
     rungLabel: RUNGS[rung].label,
     preferredRung: preferred,
-    minimumRung: s.minimumRung,
+    minimumRung: effectiveMin,
+    declaredMinimumRung: s.minimumRung,
+    belowMinimum,
     laddered: rung !== preferred,
     eventLimited,
     costPerEventMajor: cpe,
@@ -1525,6 +1638,8 @@ export function recommendFunnel(inputs: FunnelInputs): FunnelRecommendation {
     ...(inputs.currency !== undefined ? { currency: inputs.currency } : {}),
   };
 
+  const primaryCpe = cpeFor(primaryRungFor(inputs.archetype), budgetInput);
+
   let candidate: FunnelTemplateId;
 
   if (inputs.purchasesLast180d === 0 && !inputs.hasCustomerList) {
@@ -1538,10 +1653,11 @@ export function recommendFunnel(inputs: FunnelInputs): FunnelRecommendation {
         : `No conversion history, and under ${money(FUNNEL_TEMPLATES.seed_and_harvest.declaredMinViableDailyMajor)}` +
           `/day the seed pool never reaches 1,000 people, so the seed campaign would be paying for nothing.`,
     );
-  } else if (budget < 50) {
+  } else if (budget < FUNNEL_TEMPLATES.broad_plus_recapture.declaredMinViableDailyMajor) {
     candidate = 'single_engine';
     notes.push(
-      `Under $50/day a second ad set takes budget away from the one that converts without being able to ` +
+      `Under ${money(FUNNEL_TEMPLATES.broad_plus_recapture.declaredMinViableDailyMajor)}/day a second ad ` +
+        `set takes budget away from the one that converts without being able to ` +
         `reach its own floor. Meta's own consolidation guidance says the same thing from the other direction: ` +
         `"when you run too many ad sets at the same time, each one gets fewer opportunities to learn".`,
     );
@@ -1561,10 +1677,26 @@ export function recommendFunnel(inputs: FunnelInputs): FunnelRecommendation {
   ) {
     candidate = 'value_ladder';
     notes.push('Real purchase history plus a value spread: the only seed whose behaviour is the behaviour you want.');
-  } else if (budget >= FUNNEL_TEMPLATES.full_three_stage.declaredMinViableDailyMajor) {
+  } else if (
+    budget >= FUNNEL_TEMPLATES.full_three_stage.declaredMinViableDailyMajor &&
+    primaryCpe !== undefined &&
+    primaryCpe <= FULL_THREE_STAGE_MAX_CPA_MAJOR
+  ) {
     candidate = 'full_three_stage';
   } else {
     candidate = 'broad_plus_recapture';
+    if (
+      budget >= FUNNEL_TEMPLATES.full_three_stage.declaredMinViableDailyMajor &&
+      primaryCpe !== undefined
+    ) {
+      notes.push(
+        `The budget would reach the three-stage template, but at ${money(primaryCpe)} per ` +
+          `${RUNGS[primaryRungFor(inputs.archetype)].label} the bottom stage needs ` +
+          `${money(floorDailyFor(primaryCpe))}/day of its own — the template is only offered under ` +
+          `${money(FULL_THREE_STAGE_MAX_CPA_MAJOR)}. The extra stage would be paid for out of the stage ` +
+          `that converts.`,
+      );
+    }
   }
 
   // Now let the arithmetic veto it, walking down the fallback chain until something holds.
@@ -1808,6 +1940,19 @@ export function splitMinor(totalMinor: number, shares: readonly number[]): numbe
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
+
+/** Whichever of two on-ladder rungs is dearer (earlier on the ladder). */
+function dearerOf(
+  a: OptimisationRung,
+  b: OptimisationRung,
+  ladder: readonly OptimisationRung[],
+): OptimisationRung {
+  const ia = ladder.indexOf(a);
+  const ib = ladder.indexOf(b);
+  if (ia < 0) return b;
+  if (ib < 0) return a;
+  return ia <= ib ? a : b;
+}
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;

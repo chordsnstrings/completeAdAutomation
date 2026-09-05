@@ -156,7 +156,11 @@ export const RETENTION_MAX_DAYS: Record<AudienceSourceKind, number> = {
  * `retention_days` back (see `RETENTION_READBACK_FIELDS`).
  */
 export const RETENTION_SAFE_MAX_DAYS: Record<AudienceSourceKind, number> = {
-  video: 365,
+  // 180, not 365: a video audience carries its window in the TOP-LEVEL `retention_days`, and
+  // the CustomAudience node reference caps that field at 1-180. The 365 in the row above is the
+  // rule-level `retention_seconds` ceiling, which video audiences do not use. Anything between
+  // the two is buildable and is the range Meta is reported to truncate silently, so it warns.
+  video: 180,
   page: 365,
   page_likes: 0,
   ig_business: 365,
@@ -1072,6 +1076,24 @@ export function classifyAudienceReadiness(
       verdict: 'wait',
       shortfall: lower !== undefined ? Math.max(0, floor - lower) : 0,
       reason: `operation_status ${op} — still populating. 441 is the normal building state.`,
+      warnings,
+    };
+  }
+
+  // The research states the contract as an IFF: proceed iff operation_status is 200 or 400
+  // (plus the usable-but-logged codes above). Everything documented is now accounted for, so a
+  // code that reaches here is one Meta has added since. Defaulting an unknown status to
+  // "proceed" would let a new failure state publish silently, which is the failure this whole
+  // gate exists to prevent; it waits instead, and awaitAudienceReady then reports it by number.
+  if (op !== undefined && op !== 200 && op !== 400 && !OPERATION_STATUS_WARN.has(op)) {
+    return {
+      ...base,
+      verdict: 'wait',
+      shortfall: 0,
+      reason:
+        `operation_status ${op} (${node.operation_status?.description ?? 'no description'}) is not a code ` +
+        `this module recognises. Treating an unknown status as usable would publish against it; check it ` +
+        `against Meta's CustomAudience reference before targeting this audience.`,
       warnings,
     };
   }

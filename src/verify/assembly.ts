@@ -806,26 +806,40 @@ export async function run(): Promise<VerifyReport> {
     await rec.step('escaping: escapeFilterArgument survives a real filtergraph', async () => {
       const results: string[] = [];
       const broken: string[] = [];
-      for (const name of ['plain', 'co,mma', 'col:on', 'semi;colon', 'brack[et]']) {
+      // `'` and `\` are in this list because leaving them out is how the single-pass
+      // escaper survived: it was broken for `:` `'` AND `\` — three of the six special
+      // characters — but the original five names here only happened to exercise the
+      // colon. A character class the probe does not name is a character class the module
+      // is not verified against, so every character either escaper touches is named here,
+      // plus one path that carries all of them at once.
+      const classes = [
+        'plain', 'co,mma', 'col:on', 'semi;colon', 'brack[et]', "quo'te", 'back\\slash',
+        "all:of,them;at[once]'too",
+      ];
+      for (const name of classes) {
         const p = join(work, `${name}.ass`);
         writeFileSync(p, readFileSync(assPath));
         const r = await ffmpegAllowFail(ctx, [
           '-hide_banner', '-nostdin', '-f', 'lavfi', '-i', 'color=c=black:s=160x160:r=5:d=0.2',
-          '-vf', `ass=filename=${escapeFilterArgument(p)}`, '-f', 'null', '-',
+          // Through the real caller, and with fontsdir set so TWO escaped values share one
+          // filter — a graph that parses with one escaped value can still break with two.
+          '-vf', buildCaptionBurnFilter(p, work), '-f', 'null', '-',
         ]);
         results.push(`${name}=${r.code === 0 ? 'ok' : 'FAIL'}`);
         if (r.code !== 0) broken.push(`"${name}" -> ${escapeFilterArgument(p)} (${r.stderr.trim().split('\n').slice(-1)[0] ?? ''})`);
       }
       need(
         broken.length === 0,
-        `escapeFilterArgument produces a filtergraph ffmpeg rejects for ${broken.length} of 5 character ` +
-          `classes: ${broken.join(' ; ')}. A ":" is special at BOTH the filtergraph level and the filter-option ` +
-          `level, so it needs two backslashes ("\\\\:"), not one; "," ";" "[" "]" are graph-level only and one ` +
-          `is correct. Verified fix: value.replace(/([\\\\':])/g,'\\\\$1').replace(/([\\\\',;\\[\\]])/g,'\\\\$1'), ` +
-          `which round-trips all of , : ; [ ] ' and backslash. Note test/assembly.test.ts:602 asserts the ` +
-          `current single-backslash colon output and must change with it.`,
+        `escapeFilterArgument produces a filtergraph ffmpeg rejects for ${broken.length} of ` +
+          `${classes.length} character classes: ${broken.join(' ; ')}. ffmpeg unescapes a filter ` +
+          `argument at two nested levels: the filter-OPTION parser (where "\\", "'" and the option ` +
+          `separator ":" are special) and then the FILTERGRAPH parser (where "\\", "'" and the ` +
+          `separators "," ";" "[" "]" are special). A character special at BOTH levels must be ` +
+          `escaped twice; one pass over the union of the two sets emits a single backslash for it ` +
+          `and ffmpeg answers "Error opening output files: Invalid argument" — the render just fails. ` +
+          `Escape for level 1, then escape THAT result for level 2.`,
       );
-      return `all five character classes round-tripped through a live ass=filename= graph: ${results.join(' ')}`;
+      return `all ${classes.length} character classes round-tripped through a live ass=filename=/fontsdir= graph: ${results.join(' ')}`;
     });
 
     return { module, checks: rec.checks };

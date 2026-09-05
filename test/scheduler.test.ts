@@ -630,8 +630,8 @@ test('a response with no tier field must not downgrade a Full-tier account', () 
   );
   assert.equal(s.snapshot('act_1').capacity, POINT_CEILING.FULL);
 
-  // Only `x-business-use-case-usage` carries `ads_api_access_tier`, so a response with
-  // just the point-score header says NOTHING about the tier. Reading silence as "Limited"
+  // Three headers CAN carry `ads_api_access_tier`, but this response carries it in none
+  // of them, so it says NOTHING about the tier. Reading silence as "Limited"
   // clamps a 9000-point bucket to 60 and then makes the read reserve unreachable for
   // minutes — a stall invented out of a missing header.
   s.observe('act_1', headers({ 'x-ad-account-usage': '{"acc_id_util_pct":10}' }));
@@ -753,4 +753,175 @@ test('the queue refuses a budget it could not honestly write', () => {
   assert.throws(() => q.propose({ ...PROPOSAL, valueMinorUnits: -5000 }), /minor units/);
   assert.throws(() => q.propose({ ...PROPOSAL, targetId: '' }), /targetId is required/);
   assert.equal(q.stats().pending, 0, 'nothing invalid may reach the queue');
+});
+
+/* ------------------------------------------------- the three unmodelled limiters ---- */
+
+test('the Insights limiter gates the read lane, and it is not the ads_insights BUC bucket', () => {
+  const clock = fakeClock();
+  const s = new MetaScheduler({ now: clock.now });
+  // `x-fb-ads-insights-throttle` is a SECOND gate on insights calls. At 100% Meta is
+  // already refusing them while the BUC percentages still read comfortable, so a
+  // scheduler that watches only BUC dials out into a closed door.
+  s.observe(
+    'act_1',
+    headers({
+      'x-fb-ads-insights-throttle': '{"app_id_util_pct":2,"acc_id_util_pct":100}',
+      'x-business-use-case-usage': bucHeader([{ type: 'ads_insights', call_count: 3, total_cputime: 2 }]),
+    }),
+  );
+
+  const v = s.check({ lane: 'READ', adAccountId: 'act_1' });
+  assert.equal(v.allowed, false, 'the insights limiter at 100% must stop reporting');
+  assert.equal(v.scope, 'act_1/insights');
+  assert.equal(v.retryAfterMs, 600_000);
+  assert.match(v.reason, /acc_id_util_pct 100%/);
+
+  // It governs insights traffic only: publishing and object reads draw on ads_management.
+  assert.equal(s.check({ lane: 'WRITE', adAccountId: 'act_1' }).allowed, true);
+  assert.equal(s.check({ lane: 'READ', adAccountId: 'act_1', useCase: 'ads_management' }).allowed, true);
+
+  // acc_id_util_pct is per account.
+  assert.equal(s.check({ lane: 'READ', adAccountId: 'act_2' }).allowed, true);
+
+  clock.advance(599_999);
+  assert.equal(s.check({ lane: 'READ', adAccountId: 'act_1' }).allowed, false, 'released 1 ms early');
+  clock.advance(1);
+  assert.equal(s.check({ lane: 'READ', adAccountId: 'act_1' }).allowed, true, 'never released');
+});
+
+test('90% is the insights stop signal, and a rosy reading does not release the stand-off early', () => {
+  const clock = fakeClock();
+  const s = new MetaScheduler({ now: clock.now });
+  // The dossier is explicit that waiting for 100 is too late: throttling is in effect
+  // before Meta reports it.
+  s.observe('act_1', headers({ 'x-fb-ads-insights-throttle': '{"app_id_util_pct":0,"acc_id_util_pct":90}' }));
+  const v = s.check({ lane: 'READ', adAccountId: 'act_1' });
+  assert.equal(v.allowed, false);
+  assert.equal(v.retryAfterMs, 120_000);
+
+  clock.advance(30_000);
+  s.observe('act_1', headers({ 'x-fb-ads-insights-throttle': '{"app_id_util_pct":0,"acc_id_util_pct":1}' }));
+  const after = s.check({ lane: 'READ', adAccountId: 'act_1' });
+  assert.equal(after.allowed, false, 'a rosy header released the insights governor early');
+  assert.equal(after.retryAfterMs, 90_000);
+  // The reported percentage still tracks reality, so the dashboard is not frozen at 90.
+  assert.equal(s.snapshot('act_1').insightsPct, 1);
+
+  // 89 is under the threshold and must not stand anyone down.
+  const s2 = new MetaScheduler({ now: fakeClock().now });
+  s2.observe('act_1', headers({ 'x-fb-ads-insights-throttle': '{"app_id_util_pct":89,"acc_id_util_pct":89}' }));
+  assert.equal(s2.check({ lane: 'READ', adAccountId: 'act_1' }).allowed, true);
+});
+
+test('app_id_util_pct is app-wide: one account observing it stands every account down', () => {
+  const clock = fakeClock();
+  const s = new MetaScheduler({ now: clock.now });
+  s.observe('act_1', headers({ 'x-fb-ads-insights-throttle': '{"app_id_util_pct":100,"acc_id_util_pct":3}' }));
+
+  // act_2 has never been seen. Holding this pool per account would make every brand
+  // rediscover the exhaustion by being refused by Meta, one response at a time.
+  const v = s.check({ lane: 'READ', adAccountId: 'act_2' });
+  assert.equal(v.allowed, false);
+  assert.match(v.reason, /app_id_util_pct 100% app-wide/);
+  assert.equal(s.snapshot('act_2').insightsAppBlockedForMs, 600_000);
+  // Still only insights traffic, though: it is the Insights limiter, not the platform one.
+  assert.equal(s.check({ lane: 'WRITE', adAccountId: 'act_2' }).allowed, true);
+});
+
+test('ads_api_access_tier is read from x-ad-account-usage, not just from the BUC header', () => {
+  const clock = fakeClock();
+  const s = new MetaScheduler({ now: clock.now });
+  // The dossier records the field in all three headers. Reading only the BUC one caps a
+  // Full-tier account at 60 points — 20 writes per five minutes instead of 3000.
+  s.observe(
+    'act_1',
+    headers({ 'x-ad-account-usage': '{"acc_id_util_pct":9.67,"reset_time_duration":100,"ads_api_access_tier":"standard_access"}' }),
+  );
+  const snap = s.snapshot('act_1');
+  assert.equal(snap.fullTier, true);
+  assert.equal(snap.capacity, POINT_CEILING.FULL);
+  // The Full-tier block floor is 60 s, not 300 s, and it follows the tier.
+  const s2 = new MetaScheduler({ now: fakeClock().now });
+  s2.observe(
+    'act_1',
+    headers({ 'x-ad-account-usage': '{"acc_id_util_pct":100,"ads_api_access_tier":"standard_access"}' }),
+  );
+  assert.equal(s2.check({ lane: 'WRITE', adAccountId: 'act_1' }).retryAfterMs, 60_000);
+});
+
+test('an unknown tier string in x-ad-account-usage still lands on the low tier', () => {
+  const s = new MetaScheduler({ now: fakeClock().now });
+  // Whether the May 2026 rename changed the header strings is UNVERIFIED, and a wrong
+  // guess UPWARDS runs a 60-point account at a 9000-point ceiling.
+  s.observe('act_1', headers({ 'x-ad-account-usage': '{"acc_id_util_pct":1,"ads_api_access_tier":"full_access"}' }));
+  assert.equal(s.snapshot('act_1').capacity, POINT_CEILING.LIMITED);
+  assert.equal(s.snapshot('act_1').fullTier, false);
+});
+
+test('a Limited reading in one header is not overruled by a stale Full reading in another', () => {
+  const s = new MetaScheduler({ now: fakeClock().now });
+  // Both headers on one response disagreeing is not something Meta is documented to do,
+  // but the safe direction is fixed: the low tier only ever comes from the absence of
+  // `standard_access`, so a single Full claim wins and a single Limited claim does not
+  // downgrade a response that also claims Full. What must NOT happen is silence being
+  // read as Limited — that flaps the ceiling between 9000 and 60 on no evidence.
+  s.observe(
+    'act_1',
+    headers({
+      'x-business-use-case-usage': bucHeader([
+        { type: 'ads_management', call_count: 1, ads_api_access_tier: 'development_access' },
+      ]),
+      'x-ad-account-usage': '{"acc_id_util_pct":1,"ads_api_access_tier":"standard_access"}',
+    }),
+  );
+  assert.equal(s.snapshot('act_1').capacity, POINT_CEILING.FULL);
+});
+
+test('x-app-usage stands every account and both lanes down, because the pool is app-wide', () => {
+  const clock = fakeClock();
+  const s = new MetaScheduler({ now: clock.now });
+  s.observe('act_1', headers({ 'x-app-usage': '{"call_count":100,"total_time":100,"total_cputime":100}' }));
+
+  for (const adAccountId of ['act_1', 'act_2']) {
+    for (const lane of ['READ', 'WRITE'] as const) {
+      const v = s.check({ lane, adAccountId });
+      assert.equal(v.allowed, false, `${lane} on ${adAccountId} survived an exhausted app pool`);
+      assert.equal(v.scope, 'app/platform');
+      assert.equal(v.retryAfterMs, 600_000);
+      assert.match(v.reason, /x-app-usage/);
+    }
+  }
+  assert.equal(s.snapshot('act_2').appBlockedForMs, 600_000);
+
+  clock.advance(600_000);
+  assert.equal(s.check({ lane: 'WRITE', adAccountId: 'act_1' }).allowed, true, 'the platform gate never released');
+});
+
+test('x-app-usage trips on total_cputime alone, and leaves a healthy pool alone', () => {
+  const s = new MetaScheduler({ now: fakeClock().now });
+  // You can sit at call_count 12 and total_cputime 98 on an Insights-heavy workload.
+  s.observe('act_1', headers({ 'x-app-usage': '{"call_count":12,"total_time":9,"total_cputime":98}' }));
+  const v = s.check({ lane: 'WRITE', adAccountId: 'act_1' });
+  assert.equal(v.allowed, false);
+  assert.match(v.reason, /total_cputime 98/);
+
+  const s2 = new MetaScheduler({ now: fakeClock().now });
+  s2.observe('act_1', headers({ 'x-app-usage': '{"call_count":28,"total_time":25,"total_cputime":25}' }));
+  assert.equal(s2.check({ lane: 'WRITE', adAccountId: 'act_1' }).allowed, true);
+  assert.equal(s2.snapshot('act_1').appUsagePct, 28);
+});
+
+test('a malformed or absent limiter header is ignored rather than trusted as zero', () => {
+  const s = new MetaScheduler({ now: fakeClock().now });
+  // A blocked app pool must not be released by the next response failing to mention it.
+  s.observe('act_1', headers({ 'x-app-usage': '{"call_count":100,"total_time":100,"total_cputime":100}' }));
+  s.observe('act_1', headers({ 'x-app-usage': 'not json at all' }));
+  assert.equal(s.check({ lane: 'WRITE', adAccountId: 'act_1' }).allowed, false);
+  s.observe('act_1', headers({ 'x-business-use-case-usage': bucHeader([{ type: 'ads_management' }]) }));
+  assert.equal(s.check({ lane: 'WRITE', adAccountId: 'act_1' }).allowed, false);
+
+  const parsed = parseRateLimitHeaders(new Headers({ 'x-app-usage': '[1,2,3]', 'x-fb-ads-insights-throttle': '' }));
+  assert.equal(parsed.app, undefined);
+  assert.equal(parsed.insights, undefined);
 });

@@ -599,8 +599,22 @@ test('caption timings are derived, so an inverted event is a hard error', () => 
 test('text and filter-path escaping', () => {
   assert.equal(escapeAssText('a\nb'), 'a\\Nb');
   assert.ok(!escapeAssText('{\\an8}hi').includes('{'));
-  assert.equal(escapeFilterArgument('C:/w/o.ass'), 'C\\:/w/o.ass');
+  // ffmpeg unescapes a filter argument at two nested levels (option, then filtergraph),
+  // so a character that is special at BOTH — `:` `'` `\` — needs escaping twice, while
+  // the graph-only separators `,` `;` `[` `]` need it once.
+  //
+  // The colon expectation here was previously `C\:/w/o.ass` (one backslash). That was not
+  // a stylistic choice being overturned: [MEASURED, ffmpeg 6.1.1] the single-backslash
+  // form makes ffmpeg reject the whole filtergraph with "Error opening output files:
+  // Invalid argument", so every render through a path containing a colon simply failed.
+  // src/verify/assembly.ts drives all of these through a live `ass=filename=` graph.
+  assert.equal(escapeFilterArgument('C:/w/o.ass'), 'C\\\\:/w/o.ass');
   assert.equal(escapeFilterArgument("a,b;c[d]"), 'a\\,b\\;c\\[d\\]');
+  assert.equal(escapeFilterArgument("o'brien.ass"), "o\\\\\\'brien.ass");
+  assert.equal(escapeFilterArgument('a\\b.ass'), 'a\\\\\\\\b.ass');
+  // A path with no special character must come through untouched, or every ordinary
+  // filter string in the module changes shape.
+  assert.equal(escapeFilterArgument('/w/cap.ass'), '/w/cap.ass');
 });
 
 test('burn-in uses libass, never drawtext', () => {

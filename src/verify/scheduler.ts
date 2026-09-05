@@ -1438,7 +1438,68 @@ const PROBES: ProbeSpec[] = [
       s.observe(ACT, parsed);
       const v = s.check({ lane: 'READ', adAccountId: ACT });
       assert(!v.allowed, `Meta reports the insights limiter at 100% and the scheduler still says: ${JSON.stringify(v)}`);
-      return 'unreachable';
+      assert(v.retryAfterMs > 0, 'a refusal with retryAfterMs 0 is a hot loop against a throttled endpoint');
+      assert(
+        /insights limiter/.test(v.reason),
+        `the refusal must name the limiter that caused it, not a knock-on effect: ${v.reason}`,
+      );
+      // The Insights limiter is NOT the ads_insights BUC bucket, and it must not leak into
+      // the lanes it does not govern: an object read and a publish both draw on
+      // ads_management and are none of its business. Probed on a tier-free header, so the
+      // separately-documented read stall on a Limited -> Full upgrade cannot be mistaken
+      // for a leak here.
+      const cIso = clock();
+      const iso = new MetaScheduler({ now: cIso.now });
+      iso.observe(
+        ACT,
+        parseRateLimitHeaders(
+          new Headers({
+            'x-fb-ads-insights-throttle': JSON.stringify({ app_id_util_pct: 100, acc_id_util_pct: 100 }),
+          }),
+        ),
+      );
+      assert(!iso.check({ lane: 'READ', adAccountId: ACT }).allowed, 'setup: insights reads must be refused');
+      assert(
+        iso.check({ lane: 'READ', adAccountId: ACT, useCase: 'ads_management' }).allowed,
+        'the insights throttle blocked an object read, which draws on ads_management',
+      );
+      assert(iso.check({ lane: 'WRITE', adAccountId: ACT }).allowed, 'the insights throttle blocked publishing');
+
+      // acc_id_util_pct is per account; app_id_util_pct is the whole app. A second account
+      // that has never been observed must still be stood down by the app-level component.
+      assert(
+        !s.check({ lane: 'READ', adAccountId: 'act_9999999999' }).allowed,
+        'app_id_util_pct at 100% is app-wide, but a sibling ad account was still allowed to report',
+      );
+
+      // And it recovers on the clock rather than latching.
+      c.advance(v.retryAfterMs);
+      assert(s.check({ lane: 'READ', adAccountId: ACT }).allowed, 'the insights gate never released');
+
+      // 90 is the documented stop signal, and it is a stop signal on the account component
+      // alone — waiting for 100 is already too late.
+      const c2 = clock();
+      const s2 = new MetaScheduler({ now: c2.now });
+      s2.observe(
+        ACT,
+        parseRateLimitHeaders(
+          new Headers({
+            'x-fb-ads-insights-throttle': JSON.stringify({ app_id_util_pct: 4, acc_id_util_pct: 91 }),
+          }),
+        ),
+      );
+      const v2 = s2.check({ lane: 'READ', adAccountId: ACT });
+      assert(!v2.allowed, 'acc_id_util_pct 91% must already be a stop signal');
+      assert(
+        s2.check({ lane: 'READ', adAccountId: 'act_9999999999' }).allowed,
+        'an ACCOUNT-level insights throttle was wrongly applied app-wide',
+      );
+      return (
+        `x-fb-ads-insights-throttle at 100/100 refuses the read lane for ${v.retryAfterMs} ms naming the ` +
+        `insights limiter, leaves ads_management reads and writes flowing, stands a sibling account down ` +
+        `on the app component, and releases on the clock. acc_id_util_pct 91 alone stops only its own ` +
+        `account. Before the fix the header was not parsed at all and check() said allowed:true.`
+      );
     },
   },
   {
@@ -1460,17 +1521,59 @@ const PROBES: ProbeSpec[] = [
           `parseRateLimitHeaders() in src/meta/rateLimit.ts drops ads_api_access_tier from that header, so ` +
           `RateLimitState.adAccount cannot carry it and tierOf() in scheduler.ts has nothing to read.`,
       );
-      return 'unreachable';
+      // The safe-direction default must survive: an unknown string is still the low tier,
+      // because guessing upwards runs a 60-point account at a 9000-point ceiling.
+      const s2 = new MetaScheduler({ now: clock().now });
+      s2.observe(
+        ACT,
+        parseRateLimitHeaders(new Headers({ 'x-ad-account-usage': acctHeaderJson(1, 100, 'full_access') })),
+      );
+      assert(
+        s2.snapshot(ACT).capacity === POINT_CEILING.LIMITED,
+        'an unrecognised tier string must land on the 60-point ceiling, not the 9000-point one',
+      );
+      // And the third header that carries the field is read too.
+      const s3 = new MetaScheduler({ now: clock().now });
+      s3.observe(
+        ACT,
+        parseRateLimitHeaders(
+          new Headers({
+            'x-fb-ads-insights-throttle': JSON.stringify({
+              app_id_util_pct: 1,
+              acc_id_util_pct: 1,
+              ads_api_access_tier: 'standard_access',
+            }),
+          }),
+        ),
+      );
+      assert(
+        s3.snapshot(ACT).capacity === POINT_CEILING.FULL,
+        'x-fb-ads-insights-throttle also carries ads_api_access_tier and is also dropped',
+      );
+      return (
+        `standard_access in x-ad-account-usage now raises the ceiling to ${snap.capacity} points ` +
+        `(3000 writes per window, not 20); x-fb-ads-insights-throttle is read for the tier too; an ` +
+        `unknown string still lands on the 60-point Limited ceiling.`
+      );
     },
   },
   {
+    // NOTE (fix): this check previously asserted `parsed.buc.size > 0 || parsed.adAccount
+    // !== undefined` — i.e. that x-app-usage must land in one of the two PRE-EXISTING
+    // fields. That assertion could only be satisfied dishonestly: `buc` is keyed
+    // `${businessObjectId}:${useCase}` and feeds the per-use-case BUC governor, and
+    // `adAccount` drives the per-account POINT bucket with its 60/9000 ceiling. Filing an
+    // app-wide percentage into either would make the scheduler drain the wrong bucket for
+    // the wrong account. The defect the check was pointing at is real and is fixed; the
+    // assertion below is the same defect stated in terms of behaviour, and is strictly
+    // stronger: parsed into its own field, AND gating both lanes on EVERY account.
     name: 'GAP: x-app-usage is not parsed, so the platform-level limiter is unmodelled',
     body: () => {
       const parsed = parseRateLimitHeaders(
         new Headers({ 'x-app-usage': JSON.stringify({ call_count: 100, total_time: 100, total_cputime: 100 }) }),
       );
       assert(
-        parsed.buc.size > 0 || parsed.adAccount !== undefined,
+        parsed.app !== undefined,
         'x-app-usage (200 calls/hour x daily active users, app-wide, throttling at 100 on any of the three ' +
           'percentages) is not parsed by src/meta/rateLimit.ts and has no representation in RateLimitState, so ' +
           'the scheduler cannot back off on it. Impact is bounded: the dossier records that BUC limits take ' +
@@ -1478,7 +1581,64 @@ const PROBES: ProbeSpec[] = [
           'x-app-usage is the only rate-limit header this app currently receives (verified live against ' +
           '/me and /me/adaccounts), so today it is the only limiter signal available and it is discarded.',
       );
-      return 'unreachable';
+      assert(
+        parsed.app.callCount === 100 && parsed.app.totalTime === 100 && parsed.app.totalCputime === 100,
+        `all three percentages must survive parsing, got ${JSON.stringify(parsed.app)}`,
+      );
+
+      const c = clock();
+      const s = new MetaScheduler({ now: c.now });
+      s.observe(ACT, parsed);
+      // This limiter is a POOL, not a per-account bucket: one observation on one account
+      // has to stand down every brand, or each tenant rediscovers the same exhaustion by
+      // being refused by Meta while the others keep draining the pool.
+      for (const acct of [ACT, 'act_other_brand', 'act_never_seen_before']) {
+        for (const lane of ['READ', 'WRITE'] as const) {
+          const v = s.check({ lane, adAccountId: acct });
+          assert(
+            !v.allowed,
+            `x-app-usage at 100% is app-wide, but ${lane} on ${acct} was allowed: ${JSON.stringify(v)}`,
+          );
+          assert(v.retryAfterMs > 0, 'a refusal with retryAfterMs 0 is a hot loop against a throttled app');
+          assert(
+            /x-app-usage/.test(v.reason),
+            `the refusal must name the app-wide limiter, not a per-account symptom: ${v.reason}`,
+          );
+        }
+      }
+      const held = s.check({ lane: 'WRITE', adAccountId: ACT }).retryAfterMs;
+      c.advance(held);
+      assert(s.check({ lane: 'WRITE', adAccountId: ACT }).allowed, 'the platform gate never released');
+
+      // total_cputime alone is enough — you can sit at call_count 12 and total_cputime 98.
+      const c2 = clock();
+      const s2 = new MetaScheduler({ now: c2.now });
+      s2.observe(
+        ACT,
+        parseRateLimitHeaders(
+          new Headers({ 'x-app-usage': JSON.stringify({ call_count: 12, total_time: 9, total_cputime: 98 }) }),
+        ),
+      );
+      const cpu = s2.check({ lane: 'WRITE', adAccountId: ACT });
+      assert(!cpu.allowed, 'total_cputime 98% was ignored because call_count looked comfortable');
+      assert(/total_cputime 98/.test(cpu.reason), `the reason must name the tripping percentage: ${cpu.reason}`);
+
+      // A healthy app must not be gated at all, or the limiter is just an outage.
+      const s3 = new MetaScheduler({ now: clock().now });
+      s3.observe(
+        ACT,
+        parseRateLimitHeaders(
+          new Headers({ 'x-app-usage': JSON.stringify({ call_count: 28, total_time: 25, total_cputime: 25 }) }),
+        ),
+      );
+      assert(s3.check({ lane: 'WRITE', adAccountId: ACT }).allowed, 'a 28% app pool blocked publishing');
+      const snap = s3.snapshot(ACT);
+      assert(snap.appUsagePct === 28, `the snapshot must report the app pool for operators, got ${snap.appUsagePct}`);
+      return (
+        `x-app-usage parses into RateLimitState.app; at 100/100/100 both lanes are refused for ${held} ms ` +
+        `on every ad account including ones never observed, the refusal names the header, and it releases ` +
+        `on the clock. total_cputime 98 with call_count 12 still stops publishing; a 28% pool does not.`
+      );
     },
   },
   {

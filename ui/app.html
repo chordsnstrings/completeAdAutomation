@@ -1,0 +1,2387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spend Control Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ------------------------------------------------------------------ tokens */
+:root {
+  color-scheme: light;
+  --bg:            #eef0f3;
+  --surface:       #ffffff;
+  --surface-2:     #f4f6f8;
+  --surface-3:     #e4e8ec;
+  --border:        #d3d9e0;
+  --border-strong: #b0b9c4;
+  --text:          #10151b;
+  --text-2:        #4b5765;
+  --text-3:        #78838f;
+  --accent:        #1c4ed8;
+  --accent-2:      #143a9e;
+  --accent-fg:     #ffffff;
+  --accent-soft:   #e3eafb;
+  --good:          #0c7247;
+  --good-soft:     #dcf1e6;
+  --warn:          #8f5a04;
+  --warn-soft:     #faeccd;
+  --crit:          #b01e2d;
+  --crit-soft:     #fbe1e3;
+  --neutral:       #5a6673;
+  --neutral-soft:  #e7eaee;
+  --shadow:        0 1px 2px rgba(16,21,27,.07), 0 1px 1px rgba(16,21,27,.04);
+  --shadow-lift:   0 2px 6px rgba(16,21,27,.10), 0 1px 2px rgba(16,21,27,.06);
+  --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg:            #0d1116;
+    --surface:       #151a21;
+    --surface-2:     #1b212a;
+    --surface-3:     #232b35;
+    --border:        #2a323d;
+    --border-strong: #3d4855;
+    --text:          #e8edf3;
+    --text-2:        #a6b1be;
+    --text-3:        #78838f;
+    --accent:        #7ba3ff;
+    --accent-2:      #a7c1ff;
+    --accent-fg:     #0b1017;
+    --accent-soft:   #17253d;
+    --good:          #46c68c;
+    --good-soft:     #10291f;
+    --warn:          #e2ab4c;
+    --warn-soft:     #2b2213;
+    --crit:          #ff6f77;
+    --crit-soft:     #331519;
+    --neutral:       #98a3af;
+    --neutral-soft:  #212832;
+    --shadow:        0 1px 2px rgba(0,0,0,.45);
+    --shadow-lift:   0 3px 10px rgba(0,0,0,.5);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg:            #0d1116;
+  --surface:       #151a21;
+  --surface-2:     #1b212a;
+  --surface-3:     #232b35;
+  --border:        #2a323d;
+  --border-strong: #3d4855;
+  --text:          #e8edf3;
+  --text-2:        #a6b1be;
+  --text-3:        #78838f;
+  --accent:        #7ba3ff;
+  --accent-2:      #a7c1ff;
+  --accent-fg:     #0b1017;
+  --accent-soft:   #17253d;
+  --good:          #46c68c;
+  --good-soft:     #10291f;
+  --warn:          #e2ab4c;
+  --warn-soft:     #2b2213;
+  --crit:          #ff6f77;
+  --crit-soft:     #331519;
+  --neutral:       #98a3af;
+  --neutral-soft:  #212832;
+  --shadow:        0 1px 2px rgba(0,0,0,.45);
+  --shadow-lift:   0 3px 10px rgba(0,0,0,.5);
+}
+
+/* ------------------------------------------------------------------ base */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13.5px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.012em; }
+p { margin: 0 0 8px; }
+a { color: var(--accent); }
+.num { font-variant-numeric: tabular-nums; }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.label {
+  font-size: 10.5px; font-weight: 600; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--text-3);
+}
+.muted { color: var(--text-2); }
+.dim { color: var(--text-3); }
+.small { font-size: 12px; }
+.tiny { font-size: 11.5px; }
+hr.rule { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
+
+/* ------------------------------------------------------------------ chrome */
+.topbar {
+  position: sticky; top: 0; z-index: 30;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 9px 18px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.brandmark { display: flex; align-items: baseline; gap: 9px; }
+.brandmark .bm-1 {
+  font-family: var(--mono); font-weight: 600; font-size: 13px;
+  letter-spacing: .10em; text-transform: uppercase;
+}
+.brandmark .bm-2 { font-size: 11.5px; color: var(--text-3); letter-spacing: .02em; }
+.demo-flag {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 3px 9px; border-radius: 3px;
+  background: var(--warn-soft); color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  font-size: 11.5px; font-weight: 500;
+}
+.demo-flag b { font-weight: 600; letter-spacing: .05em; text-transform: uppercase; font-size: 10.5px; }
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.mode-chip {
+  font-family: var(--mono); font-size: 11px; padding: 3px 8px; border-radius: 3px;
+  border: 1px solid var(--border); color: var(--text-2); background: var(--surface-2);
+}
+
+button, select, input { font-family: inherit; font-size: inherit; color: inherit; }
+.btn {
+  appearance: none; cursor: pointer;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: 4px;
+  padding: 4px 10px; font-size: 12px; font-weight: 500;
+  box-shadow: var(--shadow);
+  transition: background .12s, border-color .12s, transform .06s;
+}
+.btn:hover { background: var(--surface-2); border-color: var(--accent); }
+.btn:active { transform: translateY(1px); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+.shell { display: grid; grid-template-columns: 216px minmax(0,1fr); align-items: start; }
+.rail {
+  position: sticky; top: 47px; align-self: start;
+  height: calc(100vh - 47px); overflow-y: auto;
+  padding: 16px 12px 20px;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+.rail .label { padding: 0 8px 8px; }
+.rail button {
+  display: grid; grid-template-columns: 22px 1fr; gap: 8px; align-items: baseline;
+  width: 100%; text-align: left; cursor: pointer;
+  background: none; border: 0; border-left: 2px solid transparent;
+  padding: 7px 8px; margin-bottom: 1px; border-radius: 0 4px 4px 0;
+  color: var(--text-2); font-size: 13px; font-weight: 500;
+  transition: background .12s, color .12s;
+}
+.rail button .ix { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+.rail button:hover { background: var(--surface-2); color: var(--text); }
+.rail button[aria-current="true"] {
+  background: var(--accent-soft); color: var(--accent); border-left-color: var(--accent);
+}
+.rail button[aria-current="true"] .ix { color: var(--accent); }
+.rail .rail-note {
+  margin-top: 18px; padding: 10px 8px 0; border-top: 1px solid var(--border);
+  font-size: 11.5px; color: var(--text-3); line-height: 1.45;
+}
+main { padding: 20px 22px 64px; min-width: 0; }
+.screen[hidden] { display: none; }
+.screen-head { margin-bottom: 16px; max-width: 76ch; }
+.screen-head h1 { font-size: 20px; letter-spacing: -0.02em; }
+.screen-head .lede { color: var(--text-2); margin-top: 4px; font-size: 13px; }
+
+/* ------------------------------------------------------------------ panels */
+.panel {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; box-shadow: var(--shadow); margin-bottom: 16px;
+}
+.panel-head {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding: 10px 14px; border-bottom: 1px solid var(--border);
+}
+.panel-head h2 { font-size: 13.5px; }
+.panel-head .spacer { margin-left: auto; }
+.panel-body { padding: 14px; }
+.panel-body.tight { padding: 0; }
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px,1fr)); gap: 16px; }
+.funnel-layout { display: grid; grid-template-columns: 340px minmax(0,1fr); gap: 16px; align-items: start; }
+@media (max-width: 1100px) { .funnel-layout { grid-template-columns: minmax(0,1fr); } }
+.grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px,1fr)); gap: 12px; }
+
+/* ------------------------------------------------------------------ pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 1px 7px; border-radius: 3px;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+  border: 1px solid transparent; white-space: nowrap;
+}
+.pill.good    { background: var(--good-soft);    color: var(--good);    border-color: color-mix(in srgb, var(--good) 35%, transparent); }
+.pill.warn    { background: var(--warn-soft);    color: var(--warn);    border-color: color-mix(in srgb, var(--warn) 35%, transparent); }
+.pill.crit    { background: var(--crit-soft);    color: var(--crit);    border-color: color-mix(in srgb, var(--crit) 35%, transparent); }
+.pill.accent  { background: var(--accent-soft);  color: var(--accent);  border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+.pill.neutral { background: var(--neutral-soft); color: var(--neutral); border-color: var(--border); }
+.pill .glyph { font-family: var(--mono); font-size: 11px; }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 7px; margin: 0 4px 4px 0; border-radius: 3px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  font-size: 11.5px; color: var(--text-2); white-space: nowrap;
+}
+.chip .k { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-3); }
+.chip .v { font-family: var(--mono); font-size: 11.5px; color: var(--text); }
+.chip.incl { border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: var(--accent-soft); color: var(--accent); }
+.chip.incl .v { color: var(--accent); }
+.chip.excl { border-color: color-mix(in srgb, var(--crit) 35%, transparent); background: var(--crit-soft); color: var(--crit); }
+.chip.excl .v { color: var(--crit); }
+.chip.sugg { border-style: dashed; }
+
+/* ------------------------------------------------------------------ tables */
+.scroll-x { overflow-x: auto; }
+table.grid { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.grid th {
+  text-align: left; padding: 8px 12px; white-space: nowrap;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--text-3); border-bottom: 1px solid var(--border); background: var(--surface-2);
+  position: sticky; top: 0;
+}
+table.grid td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.grid tr:last-child td { border-bottom: 0; }
+table.grid td.r, table.grid th.r { text-align: right; }
+table.grid tbody tr:hover td { background: var(--surface-2); }
+table.grid td.nowrap { white-space: nowrap; }
+
+/* ------------------------------------------------------------------ meters */
+.meter { position: relative; height: 7px; background: var(--surface-3); border-radius: 2px; }
+.meter > i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--accent); }
+.meter > i.good { background: var(--good); }
+.meter > i.warn { background: var(--warn); }
+.meter > i.crit { background: var(--crit); }
+.meter > b { position: absolute; top: -3px; bottom: -3px; width: 1.5px; background: var(--text-3); }
+.meter > b.dash { background: repeating-linear-gradient(to bottom, var(--text-3) 0 2px, transparent 2px 4px); }
+.meter-legend { display: flex; gap: 10px; margin-top: 4px; font-size: 11px; color: var(--text-3); }
+
+/* ------------------------------------------------------------------ escalations */
+.esc { border-top: 1px solid var(--border); }
+.esc:first-child { border-top: 0; }
+.esc-row {
+  display: grid; grid-template-columns: 4px minmax(0,1fr); gap: 0;
+}
+.esc-stripe { background: var(--sev); }
+.esc-main { padding: 12px 14px; min-width: 0; }
+.esc-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 3px; }
+.esc-title { font-weight: 600; font-size: 13.5px; }
+.esc-meta { margin-left: auto; font-size: 11.5px; color: var(--text-3); font-family: var(--mono); }
+.esc-detail { color: var(--text-2); max-width: 92ch; }
+.esc-ask {
+  margin-top: 7px; padding: 7px 10px; border-radius: 4px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  font-size: 12.5px;
+}
+.esc-ask .label { display: block; margin-bottom: 2px; }
+.esc-foot { margin-top: 7px; display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ------------------------------------------------------------------ kpis */
+.kpi { padding: 12px 14px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); }
+.kpi .v { font-size: 21px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.kpi .v small { font-size: 13px; font-weight: 500; color: var(--text-3); }
+.kpi .sub { font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
+.kpi.is-crit { border-color: color-mix(in srgb, var(--crit) 50%, transparent); background: var(--crit-soft); }
+.kpi.is-crit .v { color: var(--crit); }
+
+/* ------------------------------------------------------------------ controls */
+.seg { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.seg button {
+  cursor: pointer; padding: 5px 10px; border-radius: 4px; font-size: 12.5px; font-weight: 500;
+  background: var(--surface); color: var(--text-2);
+  border: 1px solid var(--border); transition: all .12s;
+}
+.seg button:hover { border-color: var(--accent); color: var(--text); }
+.seg button[aria-pressed="true"] {
+  background: var(--accent); border-color: var(--accent); color: var(--accent-fg);
+}
+.field { margin-bottom: 14px; }
+.field > .label { display: block; margin-bottom: 6px; }
+.field .hint { font-size: 11.5px; color: var(--text-3); margin-top: 5px; }
+input[type="number"], select {
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: 4px;
+  padding: 5px 8px; font-variant-numeric: tabular-nums;
+}
+input[type="range"] {
+  -webkit-appearance: none; appearance: none; width: 100%; height: 22px; background: none; cursor: pointer;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 6px; border-radius: 3px; background: var(--surface-3); border: 1px solid var(--border);
+}
+input[type="range"]::-moz-range-track {
+  height: 6px; border-radius: 3px; background: var(--surface-3); border: 1px solid var(--border);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none; margin-top: -6px;
+  width: 17px; height: 17px; border-radius: 50%;
+  background: var(--accent); border: 2px solid var(--surface); box-shadow: var(--shadow-lift);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 15px; height: 15px; border-radius: 50%;
+  background: var(--accent); border: 2px solid var(--surface); box-shadow: var(--shadow-lift);
+}
+.ticks { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.budget-readout { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.checkline { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-2); }
+
+/* ------------------------------------------------------------------ verdict banner */
+.banner {
+  display: grid; grid-template-columns: 5px 1fr; border-radius: 5px; overflow: hidden;
+  border: 1px solid var(--bd); background: var(--bgc); margin-bottom: 14px;
+}
+.banner .bar { background: var(--sev); }
+.banner .body { padding: 11px 14px; }
+.banner h3 { font-size: 14.5px; margin-bottom: 3px; }
+.banner p { color: var(--text-2); margin: 0; }
+.banner.good { --sev: var(--good); --bd: color-mix(in srgb, var(--good) 35%, transparent); --bgc: var(--good-soft); }
+.banner.warn { --sev: var(--warn); --bd: color-mix(in srgb, var(--warn) 35%, transparent); --bgc: var(--warn-soft); }
+.banner.crit { --sev: var(--crit); --bd: color-mix(in srgb, var(--crit) 35%, transparent); --bgc: var(--crit-soft); }
+.banner.good h3 { color: var(--good); }
+.banner.warn h3 { color: var(--warn); }
+.banner.crit h3 { color: var(--crit); }
+
+/* ------------------------------------------------------------------ funnel flow */
+.flow { display: flex; flex-direction: column; gap: 0; }
+.stage {
+  min-width: 0;
+  border: 1px solid var(--border); border-radius: 5px; background: var(--surface-2);
+  padding: 11px 12px;
+}
+.stage.is-bad { border-color: color-mix(in srgb, var(--crit) 55%, transparent); background: var(--crit-soft); }
+.stage-top { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; flex-wrap: wrap; }
+.stage-body { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.15fr); gap: 16px; align-items: start; }
+@media (max-width: 820px) { .stage-body { grid-template-columns: minmax(0,1fr); } }
+.stage h4 { font-size: 13px; }
+.tuple {
+  font-family: var(--mono); font-size: 11px; color: var(--text-2);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 3px;
+  padding: 6px 8px; margin: 7px 0; line-height: 1.6; word-break: break-word;
+  white-space: pre-wrap; overflow-x: auto;
+}
+.flow-arrow {
+  height: 22px; display: flex; align-items: center; justify-content: center;
+  color: var(--text-3); font-family: var(--mono); font-size: 15px;
+}
+.flow-arrow::before { content: "\2193"; }
+.aud-group { margin-top: 7px; }
+.aud-group > .label { display: block; margin-bottom: 3px; }
+
+/* ------------------------------------------------------------------ arithmetic */
+.arith-bar { position: relative; height: 16px; background: var(--surface-3); border-radius: 2px; min-width: 130px; }
+.arith-bar > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: var(--good); }
+.arith-bar > i.short { background: var(--crit); }
+.arith-bar > b { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--text); }
+.arith-line {
+  font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
+  background: var(--surface-2); border-left: 2px solid var(--border-strong);
+  padding: 5px 9px; margin: 4px 0; line-height: 1.5; word-break: break-word;
+}
+.explain li { margin-bottom: 6px; color: var(--text-2); }
+.explain { margin: 0; padding-left: 18px; }
+
+/* ------------------------------------------------------------------ creative */
+.creative { border-top: 1px solid var(--border); padding: 14px; }
+.creative:first-child { border-top: 0; }
+.cre-top { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 8px; }
+.cre-id { font-family: var(--mono); font-size: 11.5px; color: var(--text-3); }
+.cre-grid { display: grid; grid-template-columns: minmax(0,1.35fr) minmax(0,1fr); gap: 16px; }
+.verdict-box {
+  border: 1px solid var(--bd); background: var(--bgc); border-radius: 5px; padding: 10px 12px;
+}
+.verdict-box.SCALE      { --bd: color-mix(in srgb, var(--good) 40%, transparent); --bgc: var(--good-soft); --vc: var(--good); }
+.verdict-box.KILL       { --bd: color-mix(in srgb, var(--crit) 40%, transparent); --bgc: var(--crit-soft); --vc: var(--crit); }
+.verdict-box.ITERATE    { --bd: color-mix(in srgb, var(--warn) 40%, transparent); --bgc: var(--warn-soft); --vc: var(--warn); }
+.verdict-box.HOLD       { --bd: var(--border); --bgc: var(--surface-2); --vc: var(--neutral); }
+.verdict-box.EQUIVALENT { --bd: var(--border); --bgc: var(--surface-2); --vc: var(--neutral); }
+.verdict-box.BLOCKED    { --bd: color-mix(in srgb, var(--crit) 40%, transparent); --bgc: var(--crit-soft); --vc: var(--crit); }
+.verdict-plain { font-size: 13px; color: var(--text); }
+.verdict-plain b { color: var(--vc); }
+.raw-reason {
+  font-family: var(--mono); font-size: 11px; line-height: 1.55; color: var(--text-2);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 3px;
+  padding: 7px 9px; margin-top: 8px; word-break: break-word;
+}
+.perf-row { display: flex; gap: 16px; flex-wrap: wrap; margin: 8px 0; }
+.perf-row div .label { display: block; }
+.perf-row div .v { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.finding { border-left: 3px solid var(--sev); padding: 6px 0 6px 9px; margin-bottom: 8px; }
+.finding .fid { font-family: var(--mono); font-size: 11.5px; font-weight: 500; }
+
+/* ------------------------------------------------------------------ learning */
+.quad { display: grid; grid-template-columns: 90px 1fr 1fr; grid-template-rows: auto 1fr 1fr auto; gap: 0; }
+.quad .cell { border: 1px solid var(--border); padding: 10px; min-height: 128px; background: var(--surface-2); }
+.quad .cell.hi { background: var(--good-soft); border-color: color-mix(in srgb, var(--good) 30%, transparent); }
+.quad .cell.lo { background: var(--crit-soft); border-color: color-mix(in srgb, var(--crit) 25%, transparent); }
+.quad .axis-y { display: flex; align-items: center; justify-content: center; text-align: center; padding: 6px; }
+.quad .axis-x { text-align: center; padding: 6px; }
+.quad .cell h5 { margin: 0 0 6px; font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; }
+.angle-tag {
+  display: block; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 3px; padding: 5px 7px; margin-bottom: 5px; font-size: 12px;
+}
+.angle-tag .st { font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+.effect { font-family: var(--mono); font-weight: 600; font-variant-numeric: tabular-nums; }
+.effect.down { color: var(--good); }
+.effect.up { color: var(--crit); }
+.effect.flat { color: var(--text-3); }
+.conf-bar { position: relative; height: 5px; width: 64px; background: var(--surface-3); border-radius: 2px; display: inline-block; vertical-align: middle; }
+.conf-bar > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: var(--accent); }
+.conf-bar > b { position: absolute; top: -2px; bottom: -2px; width: 1.5px; background: var(--text-3); }
+.note-block {
+  border-left: 3px solid var(--accent); background: var(--accent-soft);
+  padding: 9px 12px; border-radius: 0 4px 4px 0; font-size: 12.5px; color: var(--text);
+}
+.note-block.plain { border-left-color: var(--border-strong); background: var(--surface-2); }
+
+/* ------------------------------------------------------------------ responsive */
+@media (max-width: 900px) {
+  .shell { grid-template-columns: minmax(0,1fr); }
+  .rail {
+    position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border);
+    display: flex; gap: 4px; overflow-x: auto; padding: 8px 10px;
+  }
+  .rail .label, .rail .rail-note { display: none; }
+  .rail button { width: auto; white-space: nowrap; border-left: 0; border-bottom: 2px solid transparent; border-radius: 4px; }
+  .rail button[aria-current="true"] { border-left-color: transparent; border-bottom-color: var(--accent); }
+  .cre-grid { grid-template-columns: minmax(0,1fr); }
+  main { padding: 16px 13px 56px; }
+  .quad { grid-template-columns: 1fr; grid-template-rows: none; }
+  .quad .axis-y { display: none; }
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brandmark">
+    <span class="bm-1">Spend&nbsp;Control</span>
+    <span class="bm-2">operator console</span>
+  </div>
+  <div class="demo-flag"><b>Demo data</b> synthetic figures — no live ad account is connected</div>
+  <div class="topbar-right">
+    <span class="mode-chip">RUNTIME_MODE=SIMULATE</span>
+    <span class="mode-chip" id="clock">—</span>
+    <button class="btn" id="theme-btn" type="button">Theme: system</button>
+  </div>
+</header>
+
+<div class="shell">
+  <nav class="rail" aria-label="Screens">
+    <div class="label">Screens</div>
+    <button type="button" data-nav="overview"><span class="ix">01</span><span>Overview</span></button>
+    <button type="button" data-nav="brands"><span class="ix">02</span><span>Brands</span></button>
+    <button type="button" data-nav="funnel"><span class="ix">03</span><span>Funnel builder</span></button>
+    <button type="button" data-nav="creative"><span class="ix">04</span><span>Creative</span></button>
+    <button type="button" data-nav="learning"><span class="ix">05</span><span>Learning</span></button>
+    <div class="rail-note">
+      Autonomous loop last completed 06:00 UTC.<br>
+      Publishing is <b>halted</b>: 3 critical escalations.
+    </div>
+  </nav>
+
+  <main>
+    <section class="screen" id="screen-overview" hidden></section>
+    <section class="screen" id="screen-brands" hidden></section>
+    <section class="screen" id="screen-funnel" hidden></section>
+    <section class="screen" id="screen-creative" hidden></section>
+    <section class="screen" id="screen-learning" hidden></section>
+  </main>
+</div>
+
+<script>
+"use strict";
+/* =====================================================================
+   Spend Control — operator console (working prototype).
+
+   Every structure below mirrors a real type in src/. Demo values only.
+     Brand / SpendEnvelope / ClaimSet / Destination  -> src/domain/brand.ts
+     ARCHETYPES + confidence                         -> src/meta/objectives.ts
+     CreativeGenome + Angle + classifyAngle          -> src/domain/genome.ts
+     Verdict + verdictFor() reason strings           -> src/autonomy/decide.ts
+     PolicyVerdict + rule ids + remedies             -> src/policy/screen.ts
+     FUNNEL_TEMPLATES + assessFunnelBudget()         -> src/funnel/templates.ts
+   ===================================================================== */
+
+/* ------------------------------------------------------------ objectives.ts */
+const ARCHETYPES = {
+  website_purchase: { archetype:'website_purchase', objective:'OUTCOME_SALES', destinationType:'WEBSITE',
+    optimizationGoal:'OFFSITE_CONVERSIONS', billingEvent:'IMPRESSIONS', promotedObject:'pixel_event', confidence:'inferred',
+    note:"OUTCOME_SALES never appears as a target objective in Meta's Objective Mapping table, so this tuple is reasoned rather than quoted. It is the highest-value unverified assumption in the system — settle it with a real create call before relying on it." },
+  website_lead: { archetype:'website_lead', objective:'OUTCOME_LEADS',
+    optimizationGoal:'OFFSITE_CONVERSIONS', billingEvent:'IMPRESSIONS', promotedObject:'pixel_event', confidence:'documented',
+    note:'destination_type omitted — the mapping row for pixel conversions under OUTCOME_LEADS does not set it.' },
+  instant_form_lead: { archetype:'instant_form_lead', objective:'OUTCOME_LEADS', destinationType:'ON_AD',
+    optimizationGoal:'LEAD_GENERATION', billingEvent:'IMPRESSIONS', promotedObject:'page', confidence:'documented',
+    note:'On-Meta destination: needs no domain verification, no pixel and no AEM configuration. Requires the leads_retrieval scope, which cannot be added to an existing token.' },
+  messenger_lead: { archetype:'messenger_lead', objective:'OUTCOME_LEADS', destinationType:'LEAD_FROM_MESSENGER',
+    optimizationGoal:'LEAD_GENERATION', billingEvent:'IMPRESSIONS', promotedObject:'page', confidence:'documented',
+    note:'On-Meta destination — no website prerequisites.' },
+  whatsapp_conversation: { archetype:'whatsapp_conversation', objective:'OUTCOME_ENGAGEMENT', destinationType:'WHATSAPP',
+    optimizationGoal:'CONVERSATIONS', billingEvent:'IMPRESSIONS', promotedObject:'page', confidence:'inferred',
+    note:'The mapping table documents CONVERSATIONS for MESSENGER; WHATSAPP is a legal destination but the goal pairing is not stated. Verify before use.' },
+  phone_call: { archetype:'phone_call', objective:'OUTCOME_LEADS', destinationType:'PHONE_CALL',
+    optimizationGoal:'QUALITY_CALL', billingEvent:'IMPRESSIONS', promotedObject:'page', confidence:'inferred',
+    note:"Meta's per-value requirements for PHONE_CALL still name the LEGACY objectives (PRODUCT_CATALOG_SALES / CONVERSIONS), contradicting the objective table. Needs an empirical test." },
+  catalog_sales: { archetype:'catalog_sales', objective:'OUTCOME_SALES',
+    optimizationGoal:'OFFSITE_CONVERSIONS', billingEvent:'IMPRESSIONS', promotedObject:'product_set', confidence:'inferred',
+    note:'The PRODUCT_CATALOG_SALES -> OUTCOME_SALES mapping row could not be confirmed against the live doc. Catalogue ads are a separate creative shape (template_data), not a variant of the video pipeline.' },
+  traffic: { archetype:'traffic', objective:'OUTCOME_TRAFFIC',
+    optimizationGoal:'LANDING_PAGE_VIEWS', billingEvent:'IMPRESSIONS', promotedObject:'none', confidence:'documented',
+    note:'destination_type deliberately omitted — OUTCOME_TRAFFIC does not list WEBSITE as legal, so sending the obvious-looking value is itself the bug.' },
+  app_install: { archetype:'app_install', objective:'OUTCOME_APP_PROMOTION',
+    optimizationGoal:'APP_INSTALLS', billingEvent:'IMPRESSIONS', promotedObject:'app', confidence:'documented',
+    note:'Requires application_id and object_store_url.' },
+};
+
+/* ------------------------------------------------------------ funnel/templates.ts */
+const LEARNING_PHASE_EVENTS_PER_WEEK = 50;
+const LEARNING_DAILY_MULTIPLE = 50 / 7;
+const AUDIENCE_DELIVERY_FLOOR = 1000;
+const ANGLE_EXHAUSTION_COVERAGE = 0.8;
+const INTERRUPT_EXPLORATION_FLOOR = 0.2;
+const MIN_CREATIVES_FOR_ANGLE_CLASSIFICATION = 10;
+const HIT_RATE_REFERENCE = 0.08;
+const SPEND_USE_RATIO_REFERENCE = 1.0;
+
+const RUNGS = {
+  purchase:          { id:'purchase',          label:'Purchase',          costBasis:'brand_cpa', benchmarkCpeMajor:30,   pixelEvent:'PURCHASE' },
+  add_to_cart:       { id:'add_to_cart',       label:'Add to cart',       costBasis:'benchmark', benchmarkCpeMajor:8,    pixelEvent:'ADD_TO_CART' },
+  view_content:      { id:'view_content',      label:'View content',      costBasis:'benchmark', benchmarkCpeMajor:2,    pixelEvent:'VIEW_CONTENT' },
+  landing_page_view: { id:'landing_page_view', label:'Landing page view', costBasis:'benchmark', benchmarkCpeMajor:0.8,  pixelEvent:undefined },
+  lead:              { id:'lead',              label:'Lead',              costBasis:'brand_cpa', benchmarkCpeMajor:6,    pixelEvent:'LEAD' },
+  app_install:       { id:'app_install',       label:'App install',       costBasis:'brand_cpa', benchmarkCpeMajor:3,    pixelEvent:undefined },
+  thruplay:          { id:'thruplay',          label:'ThruPlay',          costBasis:'benchmark', benchmarkCpeMajor:0.05, pixelEvent:undefined },
+  reach:             { id:'reach',             label:'Reach',             costBasis:'none',      benchmarkCpeMajor:undefined, pixelEvent:undefined },
+};
+const CONVERSION_LADDER = ['purchase','add_to_cart','view_content','landing_page_view'];
+const LEAD_LADDER = ['lead','landing_page_view'];
+const TRAFFIC_LADDER = ['landing_page_view'];
+const APP_LADDER = ['app_install'];
+
+const AUDIENCE_POOLS = {
+  purchasers_180d: { id:'purchasers_180d', label:'Purchasers, 180 days', kind:'website', retentionDays:180, sizeGated:false, undocumentedRule:false },
+  purchasers_30d:  { id:'purchasers_30d',  label:'Purchasers, 30 days',  kind:'website', retentionDays:30,  sizeGated:false, undocumentedRule:false },
+  site_visitors_30d:{ id:'site_visitors_30d', label:'Website visitors, 30 days', kind:'website', retentionDays:30, sizeGated:true, undocumentedRule:false },
+  site_visitors_1d: { id:'site_visitors_1d',  label:'Website visitors, last 1 day', kind:'website', retentionDays:1, sizeGated:false, undocumentedRule:false },
+  atc_30d:         { id:'atc_30d', label:'Add to cart, 30 days', kind:'website', retentionDays:30, sizeGated:true, undocumentedRule:false },
+  video_75_30d:    { id:'video_75_30d', label:'75% video viewers, 30 days', kind:'video', retentionDays:30, sizeGated:true, undocumentedRule:true },
+  video_75_90d:    { id:'video_75_90d', label:'75% video viewers, 90 days', kind:'video', retentionDays:90, sizeGated:true, undocumentedRule:true },
+  warm_union_30d:  { id:'warm_union_30d', label:'Warm: site visitors OR add-to-cart OR 75% viewers, 30 days', kind:'union', retentionDays:30, sizeGated:true, undocumentedRule:false },
+  lead_submitters_90d: { id:'lead_submitters_90d', label:'Lead form submitters, 90 days', kind:'engagement', retentionDays:90, sizeGated:false, undocumentedRule:false },
+  customer_list_value: { id:'customer_list_value', label:'Customer list with a value column', kind:'customer_list', retentionDays:0, sizeGated:false, undocumentedRule:false },
+  lookalike_campaign_conversions_3pct: { id:'lookalike_campaign_conversions_3pct', label:'Lookalike 3%, seeded from campaign conversions', kind:'lookalike', retentionDays:0, sizeGated:false, undocumentedRule:false },
+  lookalike_value_3pct: { id:'lookalike_value_3pct', label:'Value-based lookalike 3%', kind:'lookalike', retentionDays:0, sizeGated:false, undocumentedRule:false },
+};
+
+const AWARENESS_THRUPLAY = { objective:'OUTCOME_AWARENESS', optimizationGoal:'THRUPLAY', billingEvent:'THRUPLAY', promotedObject:'none',
+  note:'THRUPLAY is now the ONLY video optimisation goal — TWO_SECOND_CONTINUOUS_VIDEO_VIEWS survives as a billing event only, and billing on it buys volume rather than attention and builds a worthless pool.' };
+const AWARENESS_REACH = { objective:'OUTCOME_AWARENESS', optimizationGoal:'REACH', billingEvent:'IMPRESSIONS', promotedObject:'none',
+  note:'Reach, not ThruPlay. The measured upper-funnel value is in impressions delivered to NEW people (6.0x incrementality factor, 81% new-customer share), not in the retargeting pool that falls out as a by-product.' };
+
+const FUNNEL_TEMPLATES = {
+  single_engine: {
+    id:'single_engine', name:'Single Engine',
+    who:'Anyone under ~$50/day. Any brand with no pixel history. Any account in its first 30 days.',
+    declaredMinViableDailyMajor:10, requiresWarmPool:0, requiresPurchaseHistory:0,
+    audiences:['purchasers_180d'],
+    stages:[{ id:'engine', role:'prospecting', label:'Broad conversion campaign', campaign:'A', budgetLevel:'campaign',
+      budgetShare:1, archetype:'brand', rungMode:'ladder', minimumRung:'landing_page_view', advantageAudience:1,
+      target:[], suggest:[], exclude:['purchasers_180d'],
+      purpose:'One ad set, 3–6 ads. 100% of the budget lands in one place, so the learning floor is met at the lowest possible total spend, the algorithm does the retargeting internally, and there are no exclusion mistakes to make because there is only one exclusion.' }],
+    failureMode:'The account never generates enough conversion signal to climb back up the ladder and sits on a cheap event forever, buying low-intent traffic. Detect it as a falling conversion rate from the optimisation event through to purchase, week over week.',
+    killCriteria:['None. This is the floor state. If it fails, the problem is the offer or the creative, and no funnel was ever going to fix that.'],
+  },
+  seed_and_harvest: {
+    id:'seed_and_harvest', name:'Seed & Harvest',
+    who:'A brand-new ad account: no pixel history, no customer list, nothing for Meta to learn from.',
+    declaredMinViableDailyMajor:20, requiresWarmPool:0, requiresPurchaseHistory:0,
+    audiences:['video_75_90d','lookalike_campaign_conversions_3pct','purchasers_180d'],
+    stages:[
+      { id:'seed', role:'seed', label:'Seed — video views', campaign:'A', budgetLevel:'adset', budgetShare:0.5,
+        archetype:'brand', optimisation:AWARENESS_THRUPLAY, rungMode:'fixed', fixedRung:'thruplay', minimumRung:'thruplay',
+        advantageAudience:1, target:[], suggest:[], exclude:[], maxDurationDays:45,
+        purpose:'Buys first-party signal where none exists. The 45-day stop is not a nicety: once the harvest campaign has real conversions, continuing to buy video views is paying for a worse proxy of a thing you now measure directly.' },
+      { id:'harvest', role:'harvest', label:'Harvest — conversions', campaign:'B', budgetLevel:'adset', budgetShare:0.5,
+        archetype:'brand', rungMode:'ladder', minimumRung:'landing_page_view', advantageAudience:1,
+        target:[], suggest:['lookalike_campaign_conversions_3pct'], exclude:['purchasers_180d'],
+        purpose:'Runs indefinitely. The lookalike goes in HERE as a suggestion inside the existing ad set — never as a new ad set, and never as an ad set that targets the video pool directly.' },
+    ],
+    failureMode:'Soft remarketing. You optimise for ThruPlays, which finds the people most willing to watch videos, build an audience out of them, and then optimise toward that audience — compounding the selection error.',
+    killCriteria:['Automatic at day 45.','Earlier if the 75% pool is under 1,000 at day 30 — the seed campaign is not working, stop paying for it.','Earlier if the harvest campaign has accumulated 100+ conversions — real signal exists, the proxy is obsolete.'],
+  },
+  broad_plus_recapture: {
+    id:'broad_plus_recapture', name:'Broad + Recapture',
+    who:'An established pixel, 1,000+ people in a 30-day warm pool, and enough budget to feed two ad sets.',
+    declaredMinViableDailyMajor:50, requiresWarmPool:AUDIENCE_DELIVERY_FLOOR, requiresPurchaseHistory:0,
+    audiences:['warm_union_30d','purchasers_180d','site_visitors_1d'],
+    stages:[
+      { id:'prospecting', role:'prospecting', label:'Prospecting', campaign:'A', budgetLevel:'campaign', budgetShare:0.85,
+        archetype:'brand', rungMode:'ladder', minimumRung:'landing_page_view', advantageAudience:1,
+        target:[], suggest:[], exclude:['purchasers_180d'], purpose:'The engine. Gets the hook creative.' },
+      { id:'recapture', role:'recapture', label:'Recapture', campaign:'B', budgetLevel:'adset', budgetShare:0.15,
+        archetype:'brand', rungMode:'one_cheaper', minimumRung:'view_content', advantageAudience:0,
+        target:['warm_union_30d'], suggest:[], exclude:['purchasers_180d','site_visitors_1d'],
+        purpose:'Gets objection-handling, social proof or the offer — different videos, not the same video. Advantage+ audience is OFF: retargeting is the one campaign type Meta itself declines to recommend it for.' },
+    ],
+    failureMode:'Recapture reports a spectacular ROAS and everyone concludes retargeting is the business. Much of it is demand that would have converted anyway. Diagnose by breaking its results down by attribution setting and looking for a disproportionate 1-day-view concentration.',
+    killCriteria:['Warm pool falls below 1,000.','Recapture frequency exceeds ~4/week — you are re-showing to the same people.',"Recapture's share of first-touch conversions is under 5% while its last-touch share is high."],
+  },
+  full_three_stage: {
+    id:'full_three_stage', name:'Full Three-Stage Video Funnel',
+    who:'Established account, purchase CPA comfortably under $40, enough creative volume for three distinct messages.',
+    declaredMinViableDailyMajor:500, requiresWarmPool:AUDIENCE_DELIVERY_FLOOR, requiresPurchaseHistory:100,
+    audiences:['video_75_30d','site_visitors_30d','site_visitors_1d','atc_30d','purchasers_180d','warm_union_30d','lookalike_value_3pct'],
+    stages:[
+      { id:'tof', role:'tof', label:'Top — reach', campaign:'A', budgetLevel:'adset', budgetShare:0.15,
+        archetype:'brand', optimisation:AWARENESS_REACH, rungMode:'fixed', fixedRung:'reach', minimumRung:'reach',
+        advantageAudience:1, target:[], suggest:[], exclude:['purchasers_180d'],
+        purpose:'Justified by incrementality, not by pool-building. Reach-optimised, never ThruPlay-optimised.' },
+      { id:'mof', role:'mof', label:'Middle — engaged but has not landed', campaign:'B', budgetLevel:'adset', budgetShare:0.6,
+        archetype:'brand', rungMode:'one_cheaper', minimumRung:'view_content', advantageAudience:1,
+        target:[], suggest:['warm_union_30d','lookalike_value_3pct'], exclude:['purchasers_180d','site_visitors_30d'],
+        purpose:'Warm audience as a SUGGESTION, so Advantage+ stays on and the stage is not caged. The site-visitor exclusion is what makes "middle of funnel" mean anything.' },
+      { id:'bof', role:'bof', label:'Bottom — close', campaign:'C', budgetLevel:'adset', budgetShare:0.25,
+        archetype:'brand', rungMode:'primary', minimumRung:'purchase', advantageAudience:0,
+        target:['site_visitors_30d','atc_30d'], suggest:[], exclude:['purchasers_180d','site_visitors_1d'],
+        purpose:'The stage that makes the money and the stage that cannot afford its own learning phase. It is why this template has a budget floor at all.' },
+    ],
+    failureMode:'Three at once: the bottom stage starves if anyone puts these in one campaign budget; exclusion drift as windows change; and the account looks better than it is because all three stages claim the same conversions.',
+    killCriteria:['Collapse to Broad + Recapture if the bottom stage is Learning Limited for 14 consecutive days at full budget.','Collapse if total daily spend falls below 70% of the floor for 7 days.',"Collapse if the top stage's contribution cannot be distinguished from zero in a Conversion Lift test."],
+  },
+  value_ladder: {
+    id:'value_ladder', name:'Value Ladder',
+    who:'100+ purchasers (ideally 1,000+), a real spread in order value, and an exportable customer list.',
+    declaredMinViableDailyMajor:150, requiresWarmPool:0, requiresPurchaseHistory:100,
+    audiences:['customer_list_value','lookalike_value_3pct','purchasers_180d','purchasers_30d'],
+    stages:[
+      { id:'value_prospecting', role:'prospecting', label:'Value prospecting', campaign:'A', budgetLevel:'campaign', budgetShare:0.9,
+        archetype:'brand', rungMode:'primary', minimumRung:'purchase', advantageAudience:1,
+        target:[], suggest:['lookalike_value_3pct'], exclude:['purchasers_180d'],
+        purpose:'A funnel in the VALUE sense rather than the stage sense. The value-based lookalike is the only seed whose encoded behaviour ("buys, and buys a lot") is the behaviour you actually want.' },
+      { id:'existing_customer', role:'existing_customer', label:'Existing customers — repeat purchase', campaign:'B', budgetLevel:'adset', budgetShare:0.1,
+        archetype:'brand', rungMode:'one_cheaper', minimumRung:'view_content', advantageAudience:0,
+        target:['customer_list_value'], suggest:[], exclude:['purchasers_30d'],
+        purpose:'Upsell and repeat purchase. Excludes only RECENT purchasers: this is the one stage whose whole point is to reach people who have already bought. Capped low because the pool is finite by construction.' },
+    ],
+    failureMode:'The value-based lookalike underperforms plain broad — which is the EXPECTED outcome on a mature account — and the seed is doing nothing.',
+    killCriteria:['Drop the lookalike suggestion if prospecting CPA does not improve versus a 14-day pre-period without it.','Removing a suggestion is a targeting edit and WILL reset the learning phase, so test it deliberately.'],
+  },
+};
+const DOWNGRADE_PATH = {
+  single_engine: undefined, seed_and_harvest:'single_engine', broad_plus_recapture:'single_engine',
+  full_three_stage:'broad_plus_recapture', value_ladder:'broad_plus_recapture',
+};
+const EASY_GOAL_ARCHETYPE = { sales:'website_purchase', leads:'website_lead', form_leads:'instant_form_lead',
+  messages:'messenger_lead', calls:'phone_call', traffic:'traffic', app:'app_install' };
+const EASY_GOAL_LABEL = { sales:'Sell something on my website', leads:'Get enquiries through my website',
+  form_leads:'Collect enquiries without a website', messages:'Start conversations in Messenger',
+  calls:'Get phone calls', traffic:'Get visits to my site', app:'Get app installs' };
+const EASY_ASSETS_LABEL = { nothing:"I'm starting from scratch", video_views:"I've run video ads before",
+  website_traffic:'I get website traffic already', customers:'I have a customer list' };
+</script>
+
+<script>
+"use strict";
+/* =====================================================================
+   The funnel arithmetic, ported line-for-line from src/funnel/templates.ts.
+   This is the honest bit: the same numbers the publisher would use.
+   ===================================================================== */
+const round2 = (n) => Math.round(n * 100) / 100;
+const round1 = (n) => Math.round(n * 10) / 10;
+const pctS = (share) => `${Math.round(share * 100)}%`;
+let CUR = { code:'USD', symbol:'$', offset:100 };
+const CURRENCIES = { USD:{symbol:'$',offset:100}, GBP:{symbol:'£',offset:100}, EUR:{symbol:'€',offset:100} };
+function money(n, cur) {
+  const c = cur || CUR;
+  if (n === undefined || n === null || Number.isNaN(n)) return 'n/a';
+  return `${c.symbol}${round2(n).toFixed(2)}`;
+}
+function moneyMinor(minor, cur) { const c = cur || CUR; return money(minor / c.offset, c); }
+
+function primaryRungFor(a) {
+  switch (a) {
+    case 'website_purchase': case 'catalog_sales': return 'purchase';
+    case 'website_lead': case 'instant_form_lead': case 'messenger_lead':
+    case 'whatsapp_conversation': case 'phone_call': return 'lead';
+    case 'app_install': return 'app_install';
+    default: return 'landing_page_view';
+  }
+}
+function ladderFor(a) {
+  const p = primaryRungFor(a);
+  if (p === 'purchase') return CONVERSION_LADDER;
+  if (p === 'lead') return LEAD_LADDER;
+  if (p === 'app_install') return APP_LADDER;
+  return TRAFFIC_LADDER;
+}
+function oneRungCheaper(rung, ladder) {
+  const i = ladder.indexOf(rung);
+  if (i < 0 || i + 1 >= ladder.length) return rung;
+  return ladder[i + 1];
+}
+function cpeFor(rung, input) {
+  const spec = RUNGS[rung];
+  const override = input.cpeOverridesMajor ? input.cpeOverridesMajor[rung] : undefined;
+  if (override !== undefined) return override;
+  if (spec.costBasis === 'none') return undefined;
+  if (spec.costBasis === 'brand_cpa') return input.targetCpaMajor !== undefined ? input.targetCpaMajor : spec.benchmarkCpeMajor;
+  return spec.benchmarkCpeMajor;
+}
+const floorDailyFor = (cpe) => (cpe === undefined ? undefined : round2(LEARNING_DAILY_MULTIPLE * cpe));
+
+function chooseRungByLadder(from, ladder, stageDaily, input) {
+  const start = Math.max(0, ladder.indexOf(from));
+  let last = from;
+  for (let i = start; i < ladder.length; i += 1) {
+    const rung = ladder[i];
+    last = rung;
+    const floor = floorDailyFor(cpeFor(rung, input));
+    if (floor === undefined || stageDaily >= floor) return rung;
+  }
+  return last;
+}
+
+function assessStage(s, ctx) {
+  const stageDaily = round2(ctx.total * s.budgetShare);
+  let preferred, rung;
+  switch (s.rungMode) {
+    case 'fixed':      preferred = s.fixedRung || ctx.primary; rung = preferred; break;
+    case 'primary':    preferred = ctx.primary; rung = preferred; break;
+    case 'one_cheaper':preferred = oneRungCheaper(ctx.anchor, ctx.ladder); rung = preferred; break;
+    default:           preferred = ctx.primary; rung = chooseRungByLadder(ctx.primary, ctx.ladder, stageDaily, ctx.input);
+  }
+  const cpe = cpeFor(rung, ctx.input);
+  const floor = floorDailyFor(cpe);
+  const eventLimited = cpe !== undefined;
+  const affordable = cpe === undefined ? undefined : round1((stageDaily * 7) / cpe);
+  const exits = floor === undefined || stageDaily >= floor;
+  const implied = floor === undefined ? undefined : round2(floor / s.budgetShare);
+
+  const rungIndex = ctx.ladder.indexOf(rung);
+  const minIndex = ctx.ladder.indexOf(s.minimumRung);
+  const degraded = rungIndex >= 0 && minIndex >= 0 && rungIndex > minIndex;
+
+  let problem;
+  if (degraded) {
+    const minCpe = cpeFor(s.minimumRung, ctx.input);
+    const minFloor = floorDailyFor(minCpe);
+    const minAffordable = minCpe === undefined ? undefined : round1((stageDaily * 7) / minCpe);
+    problem = `"${s.label}" would have to drop to ${RUNGS[rung].label} to clear the learning phase, but it stops ` +
+      `doing its job below ${RUNGS[s.minimumRung].label}. At ${RUNGS[s.minimumRung].label} ` +
+      `(${money(minCpe)} each) it needs ${money(minFloor)}/day of its own; ${pctS(s.budgetShare)} of ` +
+      `${money(ctx.total)}/day gives it ${money(stageDaily)}/day, which buys ${minAffordable === undefined ? '?' : minAffordable} events ` +
+      `a week against the ${LEARNING_PHASE_EVENTS_PER_WEEK} it needs — ` +
+      `${round1(LEARNING_PHASE_EVENTS_PER_WEEK - (minAffordable || 0))} short.`;
+  } else if (!exits) {
+    problem = `"${s.label}" cannot exit the learning phase. Optimising for ${RUNGS[rung].label} at ${money(cpe)} ` +
+      `each, it needs ${money(floor)}/day; ${pctS(s.budgetShare)} of ${money(ctx.total)}/day gives it ` +
+      `${money(stageDaily)}/day, which buys ${affordable === undefined ? '?' : affordable} events a week against the ` +
+      `${LEARNING_PHASE_EVENTS_PER_WEEK} it needs — ${round1(LEARNING_PHASE_EVENTS_PER_WEEK - (affordable || 0))} short.`;
+  }
+
+  const arithmetic = eventLimited
+    ? `${money(stageDaily)}/day x 7 / ${money(cpe)} per ${RUNGS[rung].label} = ${affordable === undefined ? '?' : affordable} events/week ` +
+      `vs ${LEARNING_PHASE_EVENTS_PER_WEEK} needed (floor ${money(floor)}/day = ${LEARNING_PHASE_EVENTS_PER_WEEK}/7 x ${money(cpe)})`
+    : `${money(stageDaily)}/day, ${RUNGS[rung].label} — not event-limited, so no learning-phase floor applies.`;
+
+  return { stageId:s.id, label:s.label, role:s.role, budgetShare:s.budgetShare, stageDailyMajor:stageDaily,
+    rung, rungLabel:RUNGS[rung].label, preferredRung:preferred, minimumRung:s.minimumRung,
+    laddered: rung !== preferred, eventLimited, costPerEventMajor:cpe,
+    eventsNeededPerWeek:LEARNING_PHASE_EVENTS_PER_WEEK, eventsAffordablePerWeek:affordable,
+    stageFloorDailyMajor:floor, shortfallDailyMajor: floor === undefined ? 0 : round2(Math.max(0, floor - stageDaily)),
+    exitsLearning:exits, impliedTotalDailyMajor:implied, arithmetic, problem };
+}
+
+function buildExplanation(e) {
+  const lines = [];
+  lines.push(`Meta's delivery system needs about ${LEARNING_PHASE_EVENTS_PER_WEEK} optimisation events per ad set ` +
+    `per week before it stops experimenting, so each ad set needs roughly ${round2(LEARNING_DAILY_MULTIPLE)} x its own cost per event, per day.`);
+  for (const s of e.stages) lines.push(`${s.label}: ${s.arithmetic}`);
+  if (e.verdict === 'refuse') {
+    for (const s of e.failing) if (s.problem !== undefined) lines.push(s.problem);
+    if (e.required > e.total) {
+      lines.push(`${e.template.name} needs about ${money(e.required)}/day in total for every stage to clear its own ` +
+        `floor. You have ${money(e.total)}/day — ${money(e.required - e.total)}/day short.`);
+    }
+    if (e.required > e.template.declaredMinViableDailyMajor) {
+      lines.push(`Note: the playbook figure for ${e.template.name} is ${money(e.template.declaredMinViableDailyMajor)}/day, ` +
+        `but at this brand's cost per conversion the arithmetic gives ${money(e.required)}/day. The playbook figure ` +
+        `assumes a cheaper conversion than this brand has.`);
+    }
+    if (e.fallback !== undefined) {
+      lines.push(`Recommendation: ${FUNNEL_TEMPLATES[e.fallback].name}. ` + (e.fallback === 'single_engine'
+        ? `One campaign, one ad set, all ${money(e.total)}/day in one place — which is also the structure where the ` +
+          `algorithm does the retargeting internally, measured at 25–45% of a broad ad set's budget.`
+        : `Fewer stages, each with enough budget to be a real ad set.`));
+    } else {
+      lines.push(`There is no simpler structure to fall back to — this is already one campaign with one ad set. At ` +
+        `${money(e.total)}/day the honest answer is that no Meta ad set will exit the learning phase for this ` +
+        `conversion. Either raise the budget to ${money(e.required)}/day or accept that delivery will stay unstable.`);
+    }
+  } else {
+    for (const s of e.stages.filter((x) => x.laddered)) {
+      lines.push(`${s.label} will optimise for ${s.rungLabel}, not ${RUNGS[s.preferredRung].label}: at ` +
+        `${money(s.stageDailyMajor)}/day a ${RUNGS[s.preferredRung].label}-optimised ad set would need ` +
+        `${money(floorDailyFor(cpeFor(s.preferredRung, e.input)))}/day. Step it up a rung whenever the current one ` +
+        `clears ${LEARNING_PHASE_EVENTS_PER_WEEK}/week for two consecutive weeks.`);
+    }
+    lines.push(`At ${money(e.total)}/day this account can support about ${e.maxSupportableAdSets} ad set(s) at its ` +
+      `most expensive optimisation event without any of them being learning-limited.`);
+  }
+  return lines;
+}
+
+function assessFunnelBudget(templateId, input) {
+  const template = FUNNEL_TEMPLATES[templateId];
+  const total = input.dailyBudgetMajor;
+  const currency = (input.currency || 'USD').toUpperCase();
+  const ladder = ladderFor(input.archetype);
+  const primary = primaryRungFor(input.archetype);
+
+  let anchor = primary;
+  const ladderStage = template.stages.find((s) => s.rungMode === 'ladder');
+  if (ladderStage !== undefined) {
+    anchor = chooseRungByLadder(primary, ladder, total * ladderStage.budgetShare, input);
+  }
+  const stages = template.stages.map((s) => assessStage(s, { total, input, ladder, primary, anchor }));
+  const failing = stages.filter((s) => s.problem !== undefined);
+  const eventLimited = stages.filter((s) => s.eventLimited && s.impliedTotalDailyMajor !== undefined);
+  const required = eventLimited.length === 0 ? 0 : round2(Math.max.apply(null, eventLimited.map((s) => s.impliedTotalDailyMajor)));
+  const binding = eventLimited.slice().sort((a, b) => b.impliedTotalDailyMajor - a.impliedTotalDailyMajor)[0];
+  const maxCpe = Math.max.apply(null, [0].concat(stages.map((s) => (s.eventLimited ? (s.costPerEventMajor || 0) : 0))));
+  const maxSupportableAdSets = maxCpe > 0 ? Math.floor(total / (LEARNING_DAILY_MULTIPLE * maxCpe)) : template.stages.length;
+  const verdict = failing.length === 0 ? 'build' : 'refuse';
+  const fallback = verdict === 'refuse' ? DOWNGRADE_PATH[templateId] : undefined;
+  const explanation = buildExplanation({ template, stages, failing, total, required, verdict, fallback, maxSupportableAdSets, input });
+
+  return { templateId, templateName:template.name, verdict, dailyBudgetMajor:total, currency,
+    benchmarksApproximate: currency !== 'USD', stages, failingStageIds: failing.map((s) => s.stageId),
+    bindingStageId: binding ? binding.stageId : undefined, requiredDailyMajor: required,
+    shortfallDailyMajor: round2(Math.max(0, required - total)),
+    declaredMinViableDailyMajor: template.declaredMinViableDailyMajor, maxSupportableAdSets,
+    fallbackTemplateId: fallback, explanation };
+}
+
+function recommendFunnel(inputs) {
+  const considered = [];
+  const notes = [];
+  const budget = inputs.dailyBudgetMajor;
+  const budgetInput = { dailyBudgetMajor:budget, archetype:inputs.archetype, currency:inputs.currency };
+  if (inputs.targetCpaMajor !== undefined) budgetInput.targetCpaMajor = inputs.targetCpaMajor;
+
+  let candidate;
+  if (inputs.purchasesLast180d === 0 && !inputs.hasCustomerList) {
+    candidate = budget >= FUNNEL_TEMPLATES.seed_and_harvest.declaredMinViableDailyMajor ? 'seed_and_harvest' : 'single_engine';
+    notes.push(candidate === 'seed_and_harvest'
+      ? 'No conversion history and no customer list: Meta has nothing to learn from, which is the one situation where buying first-party signal is worth its own campaign.'
+      : `No conversion history, and under ${money(FUNNEL_TEMPLATES.seed_and_harvest.declaredMinViableDailyMajor)}/day the seed pool never reaches 1,000 people, so the seed campaign would be paying for nothing.`);
+  } else if (budget < 50) {
+    candidate = 'single_engine';
+    notes.push(`Under $50/day a second ad set takes budget away from the one that converts without being able to reach its own floor. Meta's own consolidation guidance says the same thing from the other direction: "when you run too many ad sets at the same time, each one gets fewer opportunities to learn".`);
+  } else if (inputs.warmPoolSize < AUDIENCE_DELIVERY_FLOOR) {
+    candidate = 'single_engine';
+    notes.push(`The 30-day warm pool holds ${inputs.warmPoolSize} people, ${AUDIENCE_DELIVERY_FLOOR - inputs.warmPoolSize} short of the ${AUDIENCE_DELIVERY_FLOOR} at which Meta delivers reliably. A recapture stage would have nobody in it. It will be added automatically once the pool gets there.`);
+  } else if (inputs.purchasesLast180d >= FUNNEL_TEMPLATES.value_ladder.requiresPurchaseHistory && inputs.hasCustomerList
+             && inputs.valueSpreadMaterial === true && budget >= FUNNEL_TEMPLATES.value_ladder.declaredMinViableDailyMajor) {
+    candidate = 'value_ladder';
+    notes.push('Real purchase history plus a value spread: the only seed whose behaviour is the behaviour you want.');
+  } else if (budget >= FUNNEL_TEMPLATES.full_three_stage.declaredMinViableDailyMajor) {
+    candidate = 'full_three_stage';
+  } else {
+    candidate = 'broad_plus_recapture';
+  }
+
+  let current = candidate;
+  let assessment = assessFunnelBudget(current, budgetInput);
+  const guard = new Set();
+  while (assessment.verdict === 'refuse' && !guard.has(current)) {
+    guard.add(current);
+    considered.push({ templateId:current, verdict:'refuse',
+      why: assessment.explanation.filter((l) => l.indexOf('short') >= 0 || l.indexOf('Recommendation') === 0).join(' ') });
+    const next = DOWNGRADE_PATH[current];
+    if (next === undefined) break;
+    current = next;
+    assessment = assessFunnelBudget(current, budgetInput);
+  }
+  considered.push({ templateId:current, verdict:assessment.verdict,
+    why: assessment.verdict === 'build'
+      ? `Every stage clears its own learning-phase floor at ${money(budget)}/day.`
+      : `Even this structure cannot clear the floor at ${money(budget)}/day.` });
+
+  return { templateId:current, template:FUNNEL_TEMPLATES[current], assessment, considered, notes };
+}
+
+function validateSpecLite(spec) {
+  const DEST = {
+    OUTCOME_AWARENESS:['UNDEFINED','WEBSITE','MESSENGER','WHATSAPP','INSTAGRAM_DIRECT'],
+    OUTCOME_TRAFFIC:['UNDEFINED','MESSENGER','WHATSAPP','PHONE_CALL'],
+    OUTCOME_ENGAGEMENT:['UNDEFINED','MESSENGER','WHATSAPP','PHONE_CALL','INSTAGRAM_DIRECT','ON_POST','ON_EVENT','ON_VIDEO','ON_PAGE'],
+    OUTCOME_LEADS:['ON_AD','LEAD_FROM_MESSENGER','LEAD_FROM_IG_DIRECT','PHONE_CALL','UNDEFINED','WEBSITE','APP'],
+    OUTCOME_SALES:['WEBSITE','MESSENGER','PHONE_CALL'],
+    OUTCOME_APP_PROMOTION:['UNDEFINED'],
+  };
+  if (spec.destinationType === undefined) return undefined;
+  return DEST[spec.objective].indexOf(spec.destinationType) >= 0 ? undefined
+    : `destination_type=${spec.destinationType} is not available for ${spec.objective}.`;
+}
+function resolveStageSpec(stage, brandArchetype) {
+  const base = ARCHETYPES[stage.archetype === 'brand' ? brandArchetype : stage.archetype];
+  const o = stage.optimisation;
+  if (o === undefined) return base;
+  const derived = { archetype:base.archetype, objective:o.objective, optimizationGoal:o.optimizationGoal,
+    billingEvent:o.billingEvent, promotedObject:o.promotedObject, confidence:'inferred',
+    note:`Funnel stage "${stage.id}" overrides the ${base.archetype} tuple with ${o.objective}/${o.optimizationGoal}/${o.billingEvent} and omits destination_type. ${o.note}` };
+  if (o.destinationType !== undefined) derived.destinationType = o.destinationType;
+  return derived;
+}
+function splitMinor(totalMinor, shares) {
+  const raw = shares.map((s) => Math.floor(totalMinor * s));
+  let remainder = totalMinor - raw.reduce((a, b) => a + b, 0);
+  if (remainder === 0 || raw.length === 0) return raw;
+  const order = shares.map((s, i) => ({ s, i })).sort((a, b) => b.s - a.s).map((x) => x.i);
+  let k = 0;
+  while (remainder > 0) { const idx = order[k % order.length]; raw[idx] += 1; remainder -= 1; k += 1; }
+  return raw;
+}
+function resolveEasyOptions(o) {
+  const offset = o.currencyOffset || 100;
+  const budgetMajor = o.dailyBudgetMinor / offset;
+  const archetype = EASY_GOAL_ARCHETYPE[o.goal];
+  const warnings = [];
+  const purchases = o.purchasesLast180d !== undefined ? o.purchasesLast180d : (o.assets === 'customers' ? 100 : 0);
+  if (o.purchasesLast180d === undefined) {
+    warnings.push(`purchasesLast180d was not supplied; assumed ${purchases} from "${EASY_ASSETS_LABEL[o.assets]}". Read it from Insights before publishing — the template choice turns on it.`);
+  }
+  const warmDefaults = { nothing:0, video_views:0, website_traffic:AUDIENCE_DELIVERY_FLOOR, customers:AUDIENCE_DELIVERY_FLOOR };
+  const warmPool = o.warmPoolSize !== undefined ? o.warmPoolSize : warmDefaults[o.assets];
+  if (o.warmPoolSize === undefined) {
+    warnings.push(`warmPoolSize was not supplied; assumed ${warmPool} from "${EASY_ASSETS_LABEL[o.assets]}". This is the number that decides whether a recapture stage has anybody in it — measure it, do not assume it.`);
+  }
+  const recommendation = recommendFunnel({
+    dailyBudgetMajor:budgetMajor, archetype, purchasesLast180d:purchases, warmPoolSize:warmPool,
+    hasCustomerList: o.assets === 'customers', currency:o.currency,
+    targetCpaMajor: o.targetCpaMinor !== undefined ? o.targetCpaMinor / offset : undefined,
+    valueSpreadMaterial: o.valueSpreadMaterial,
+  });
+  const template = recommendation.template;
+  const assessment = recommendation.assessment;
+  const minorBudgets = splitMinor(o.dailyBudgetMinor, template.stages.map((s) => s.budgetShare));
+  const stages = template.stages.map((s, i) => ({
+    stage:s, spec:resolveStageSpec(s, archetype), dailyBudgetMinor:minorBudgets[i],
+    arithmetic: assessment.stages.find((a) => a.stageId === s.id),
+    targetPools: s.target.map((p) => AUDIENCE_POOLS[p]),
+    suggestPools: s.suggest.map((p) => AUDIENCE_POOLS[p]),
+    excludePools: s.exclude.map((p) => AUDIENCE_POOLS[p]),
+  }));
+  const audiencesToBuild = template.audiences.map((p) => AUDIENCE_POOLS[p]);
+  for (const pool of audiencesToBuild) {
+    if (pool.undocumentedRule) {
+      warnings.push(`"${pool.label}" is built with the video-engagement rule Meta no longer documents. Probe it against a hand-created audience before relying on it; the lookalike route via campaign conversions is the documented alternative.`);
+    }
+  }
+  if (assessment.benchmarksApproximate) {
+    warnings.push(`Cost-per-event benchmarks are tier-1 US figures applied to a ${o.currency} account. Replace them with observed costs from Insights before treating the floors as exact.`);
+  }
+  return { templateId:recommendation.templateId, template, archetype, stages, assessment, recommendation,
+    audiencesToBuild, refusal: assessment.verdict === 'refuse' ? assessment.explanation.join(' ') : undefined, warnings };
+}
+
+/* classifyAngle, from src/domain/genome.ts */
+const hitRate = (p) => p.winners / p.creativesWithSpend;
+const spendUseRatio = (p) => (p.spendUsd / p.accountSpendUsd) / (p.creativesWithSpend / p.accountCreativesWithSpend);
+function classifyAngle(p) {
+  if (p.creativesWithSpend < MIN_CREATIVES_FOR_ANGLE_CLASSIFICATION) return 'insufficient_data';
+  const highHit = hitRate(p) >= HIT_RATE_REFERENCE;
+  const highSur = spendUseRatio(p) > SPEND_USE_RATIO_REFERENCE;
+  if (highHit && highSur) return 'safest_bet';
+  if (highHit) return 'workhorse';
+  if (highSur) return 'high_variance_bet';
+  return 'stop_generating';
+}
+</script>
+
+<script>
+"use strict";
+/* =====================================================================
+   DEMO DATA. Synthetic, but shaped exactly like the real types.
+   ===================================================================== */
+const BRANDS = [
+  {
+    id:'nordhavn-supply', name:'Nordhavn Supply Co.',
+    pageId:'102884471920377', adAccountId:'act_1094820771336502', instagramUserId:'17841409283746511',
+    archetype:'website_purchase', currency:'USD',
+    destination:{ url:'https://nordhavnsupply.com/collections/waxed-canvas', pixelId:'744120988312665', customEventType:'PURCHASE' },
+    spend:{ dailyBudgetMinor:24000, maxDailyBudgetMinor:40000, targetCpaMinor:3200, contributionMarginMinor:1850 },
+    claims:{ substantiated:['Waxed in Portland, Oregon since 2014','Two-year repair warranty on every seam','Free shipping over $95'],
+      neverSay:['guaranteed','lifetime','#1','risk-free'], neverShow:['competitor logos','children unaccompanied'],
+      likenessRightsConfirmed:true },
+    specialAdCategories:['NONE'], countries:['US','CA'],
+    proposition:'Waxed canvas duffels and totes, cut and sewn in Oregon, repaired free for two years.',
+    status:'halted', statusText:'Delivery stopped 03:12 — ad account unfunded',
+    spendTodayMinor:3840, liveAds:0, pausedByMeta:6, adSets:2,
+    decisions:{ SCALE:0, HOLD:6, KILL:1, ITERATE:0, EQUIVALENT:0 }, gatedHolds:6,
+    warmPoolSize:8420, purchasesLast180d:512,
+  },
+  {
+    id:'meridian-dental', name:'Meridian Dental Partners',
+    pageId:'118273094482017', adAccountId:'act_8827301199204471',
+    archetype:'instant_form_lead', currency:'GBP',
+    destination:{ leadFormId:'2394018827740155' },
+    spend:{ dailyBudgetMinor:9000, maxDailyBudgetMinor:15000, targetCpaMinor:2200 },
+    claims:{ substantiated:['Free 30-minute implant consultation','GDC-registered clinicians at every practice','Nine practices across Greater Manchester'],
+      neverSay:['painless','guaranteed','clinically proven','best in the UK'], neverShow:['surgical footage','before/after of an identifiable patient'],
+      likenessRightsConfirmed:false },
+    specialAdCategories:['NONE'], countries:['GB'],
+    proposition:'Nine dental practices around Manchester; the ads book free implant consultations.',
+    status:'running', statusText:'Delivering — 1 budget write used of 2 today',
+    spendTodayMinor:8810, liveAds:9, pausedByMeta:0, adSets:2,
+    decisions:{ SCALE:1, HOLD:5, KILL:1, ITERATE:1, EQUIVALENT:1 }, gatedHolds:3,
+    warmPoolSize:2140, purchasesLast180d:0,
+  },
+  {
+    id:'loft-ledger', name:'Loft & Ledger Mortgages',
+    pageId:'104477201883940', adAccountId:'act_5540192834771208',
+    archetype:'website_lead', currency:'USD',
+    destination:{ url:'https://loftandledger.com/rate-check', pixelId:'901477203388125', customEventType:'LEAD' },
+    spend:{ dailyBudgetMinor:18000, maxDailyBudgetMinor:30000, targetCpaMinor:9000 },
+    claims:{ substantiated:['Licensed in 14 states (NMLS #1884420)','Rate quote in under three minutes','No origination fee on conforming loans'],
+      neverSay:['guaranteed approval','lowest rate','no credit check','risk-free'], neverShow:['foreclosure imagery','credit scores of real customers'],
+      likenessRightsConfirmed:true },
+    specialAdCategories:['CREDIT'], countries:['US'],
+    proposition:'A mortgage broker; the ads drive a rate-check form for refinance and first-time buyers.',
+    status:'degraded', statusText:'Delivering — generation halted for one angle on policy',
+    spendTodayMinor:17240, liveAds:6, pausedByMeta:0, adSets:2,
+    decisions:{ SCALE:0, HOLD:4, KILL:1, ITERATE:1, EQUIVALENT:0 }, gatedHolds:2,
+    warmPoolSize:1310, purchasesLast180d:88,
+  },
+  {
+    id:'bracken-hvac', name:'Bracken Heating & Air',
+    pageId:'—', adAccountId:'act_7712049938201766',
+    archetype:'phone_call', currency:'USD',
+    destination:{ phoneNumber:'+15039940188' },
+    spend:{ dailyBudgetMinor:6000, maxDailyBudgetMinor:12000, targetCpaMinor:5500 },
+    claims:{ substantiated:['Same-day service in Multnomah County','Oregon CCB #221904','24-hour emergency line'],
+      neverSay:['guaranteed','cheapest','#1 in Portland'], neverShow:['competitor vans'], likenessRightsConfirmed:false },
+    specialAdCategories:['NONE'], countries:['US'],
+    proposition:'Residential HVAC repair and replacement in the Portland metro; the ads generate phone calls.',
+    status:'blocked', statusText:'Never published — no Page assigned to the system user',
+    spendTodayMinor:0, liveAds:0, pausedByMeta:0, adSets:0,
+    decisions:{ SCALE:0, HOLD:0, KILL:0, ITERATE:0, EQUIVALENT:0 }, gatedHolds:0,
+    warmPoolSize:0, purchasesLast180d:0,
+  },
+];
+const brandById = (id) => BRANDS.find((b) => b.id === id);
+
+const ESCALATIONS = [
+  {
+    sev:'critical', brandId:'nordhavn-supply', since:'today 03:12 UTC', age:'6h 48m',
+    title:'Ad account cannot transact — every ad set paused by Meta',
+    code:'Meta 1487390 [ACCOUNT_BLOCKED]',
+    detail:'“The ad account has been disabled.” The account has no active payment method: the card on act_1094820771336502 was declined at 03:07 and Meta paused both ad sets — 6 live ads — at 03:12. Spend today stopped at $38.40 of the $240.00 envelope. Every ad in this brand now returns the NO_DELIVERY gate, so no posterior is being updated and no verdict is being formed — the silence is a delivery fact, not evidence about the creative.',
+    ask:'Add a funding source to act_1094820771336502 in Business Manager, then re-enable. The system will not re-activate paused ad sets on its own: a Meta-initiated pause is not ours to reverse.',
+    blocks:['4 screened creatives held at the publish step','7 decisions deferred','1 queued budget write'],
+  },
+  {
+    sev:'critical', brandId:null, since:'yesterday 22:41 UTC', age:'11h 19m',
+    title:'System user access token is dead — nothing has published or refreshed since',
+    code:'Meta 190 [AUTH_FAILED]',
+    detail:'“Error validating access token: Session has expired.” Last successful call was a GET /act_…/insights at 22:41. Insights for all four brands are stale by 11 hours, so every CPA on this console is being computed from yesterday’s rows and every ad is failing the MIN_AGE / attribution freshness checks. AUTH_FAILED is not retryable: the client stops rather than burning the rate limit against a dead credential.',
+    ask:'Issue a new long-lived system-user token with ads_management, ads_read, business_management and pages_show_list, then restart the loop. Do not extend the old one — it is revoked, not expired-and-refreshable.',
+    blocks:['All 4 brands','Insights refresh','Every publish path'],
+  },
+  {
+    sev:'critical', brandId:'loft-ledger', since:'today 04:20 UTC', age:'5h 40m',
+    title:'Generation halted for angle “rate-drop-window” — remediation budget exhausted',
+    code:'policy BLOCK · unrealistic-outcomes.income-promise',
+    detail:'Lineage ln-7a41c9 was blocked twice on the same rule and the two-attempt remediation budget is spent, so generation for this angle is halted rather than retried. Both drafts asserted a specific saving per month (“put $340/month back in your pocket”). An unbounded generate → submit → reject → regenerate loop is a machine for accumulating violations, which is exactly what escalates to an account-level restriction, so the loop stops here and asks.',
+    ask:'Either retire the angle, or add a substantiated form of the claim to claims.substantiated with its evidence (an average, dated, with the sample it came from). A human has to decide which — the system may not invent a number it can defend.',
+    blocks:['1 angle','3 planned creatives'],
+  },
+  {
+    sev:'warning', brandId:'loft-ledger', since:'onboarding', age:'14d',
+    title:'CREDIT certification has never been accepted, and no API call can clear it',
+    code:'special-ad-category.certification-precondition · Meta 100/2859024',
+    detail:'The brand declares CREDIT, so every campaign carries special_ad_category=CREDIT and Meta answers “Certification Required” (2859024) until a business admin accepts the non-discrimination policy in Business Manager. Two further facts travel with it: CREDIT was superseded by FINANCIAL_PRODUCTS_SERVICES on 2025-01-14 for US advertisers and US-targeted campaigns, and the category silently rewrites targeting — age forced to 18-65+, no gender selection, no location exclusion, 15-mile minimum radius, no lookalikes.',
+    ask:'A business admin accepts the non-discrimination policy in Business Manager, and the brand file moves from CREDIT to FINANCIAL_PRODUCTS_SERVICES with special_ad_category_country set explicitly (it defaults to the advertiser’s tax country, which is wrong for a multi-country platform).',
+    blocks:['Every campaign create for this brand'],
+  },
+  {
+    sev:'warning', brandId:'meridian-dental', since:'today 06:02 UTC', age:'3h 58m',
+    title:'Instant-form leads are being collected and cannot be downloaded',
+    code:'token scope · leads_retrieval absent',
+    detail:'instant_form_lead is delivering (63 leads in the last 7 days) but the token has no leads_retrieval scope, so GET /{form}/leads returns nothing and the CAPI feedback loop has no conversions to learn from. The scope cannot be added to an existing token — it needs a new one, granted at authorisation time.',
+    ask:'Re-authorise the system user with leads_retrieval included, and confirm the Page role. Until then the lead CPA on this brand is Meta-reported only and cannot be reconciled against the CRM.',
+    blocks:['Lead download','CAPI reconciliation for 1 brand'],
+  },
+  {
+    sev:'warning', brandId:'bracken-hvac', since:'onboarding', age:'9d',
+    title:'No Page assigned to the system user, and phone_call promotes a Page',
+    code:'preflight · promoted_object=page unavailable',
+    detail:'The brand has never published. phone_call resolves to OUTCOME_LEADS / PHONE_CALL / QUALITY_CALL with promoted_object=page, and no Page is assigned to the system user in Business Manager, so the ad set create would fail with a generic code 100 that names nothing. Preflight refuses before the call is made. Separately, this archetype’s tuple is UNVERIFIED — Meta’s per-value requirements for PHONE_CALL still name the legacy objectives, contradicting the objective table.',
+    ask:'Assign the Bracken Page to the system user with CREATE_ADS, then run the tuple probe once so the phone_call combination stops being an assumption.',
+    blocks:['Brand has never launched'],
+  },
+  {
+    sev:'warning', brandId:'nordhavn-supply', since:'today 09:41 UTC', age:'19m',
+    title:'Budget write queued — ad set is at Meta’s edit ceiling for the hour',
+    code:'Meta 613/1487632 [THROTTLED]',
+    detail:'A −20% step on ad set 120215559034810 was refused: budget edits are capped at four per hour per ad set. The write is queued for 10:41, and it is the second of the two writes this system allows itself per day. It will be dropped rather than deferred past 12:00 — no budget writes after midday, account time, because an upward write is irreversible for the calendar day.',
+    ask:'Nothing, unless it is still queued after 12:00 — then the day’s budget shape is whatever it already is.',
+    blocks:['1 budget write'],
+  },
+];
+</script>
+
+<script>
+"use strict";
+/* ------------------------------------------------------------ creatives */
+const CREATIVES = [
+  {
+    adId:'ad_120214788310772', brandId:'nordhavn-supply', adSetId:'120215559034810',
+    name:'nordhavn-supply|website_purchase|bag-outlives-you|cst-cwc-ugc-9x16',
+    angleId:'bag-outlives-you', angleStatement:'Your bag will outlive your car',
+    hook:'“Six years. Two continents. One re-wax.”',
+    genome:{ awarenessStage:'solution_aware', mechanic:'contrast_without_comment', hookTactic:'myth_busting',
+      primaryTrigger:'curiosity_gap', secondaryTrigger:'pain_agitation', template:'comparison', assetType:'ugc',
+      spokespersonType:'customer', pacing:'fast', captionStyle:'burned_in_word_by_word', aspectRatio:'9:16',
+      durationBucket:'s15_30', musicPresence:'library', dominantColour:'earth_neutral',
+      emotionalRegister:'earnest_sincere', offerType:'none', cta:'SHOP_NOW' },
+    policy:{ verdict:'PASS', complete:true, stagesRun:7, findings:[] },
+    perf:{ spendMinor:124000, conversions:31, impressions:84912, ageDays:12, learningStatus:'SUCCESS',
+      attributionSettings:['7d_click'], effectiveStatus:'ACTIVE', impressionsLast24h:5140, cpaMinor:4000 },
+    verdict:'KILL',
+    plain:'Killed. P(worse than the incumbent by more than 20%) = 0.91 after $1,240.00 of spend and 31 conversions — $40.00 per purchase against a $32.00 target, and keeping it costs about $8.12 more per conversion than replacing it.',
+    reason:'P(CPA > 1.20 × ad_120214788299341) = 91% ≥ 80%; keeping it costs ~812 minor units per conversion. Posterior over 31 conversions and 118732 minor units of completeness-corrected exposure (raw spend 124000).',
+    ref:'ad_120214788299341', action:'Paused at 06:04. Its angle stays open — one dead expression is not a dead angle.',
+  },
+  {
+    adId:'ad_23861204471190417', brandId:'meridian-dental', adSetId:'23861204470880283',
+    name:'meridian-dental|instant_form_lead|missing-tooth-avoidance|qst-ia-tht-4x5',
+    angleId:'missing-tooth-avoidance', angleStatement:'You stopped smiling in photographs',
+    hook:'“How long have you been chewing on one side?”',
+    genome:{ awarenessStage:'problem_aware', mechanic:'implied_answer', hookTactic:'question',
+      primaryTrigger:'identity_callout', secondaryTrigger:'pain_agitation', template:'talking_head_testimonial',
+      assetType:'ugc', spokespersonType:'customer', pacing:'moderate', captionStyle:'burned_in_static',
+      aspectRatio:'4:5', durationBucket:'s15_30', musicPresence:'none', dominantColour:'mono_light',
+      emotionalRegister:'calm_reassuring', offerType:'evergreen', cta:'SIGN_UP' },
+    policy:{ verdict:'WARN', complete:true, stagesRun:7, findings:[
+      { ruleId:'likeness.rights-unconfirmed', severity:'WARN', policy:'EU AI Act Art. 50 / right of publicity',
+        message:'claims.likenessRightsConfirmed is false, so no synthetic presenter may be generated. This creative uses a filmed customer with a signed release on file (provenance: release-2026-07-19.pdf), which is why it is a WARN and not a BLOCK.',
+        remedy:'Set likenessRightsConfirmed once the release covers paid social in perpetuity, or keep filming real patients.' },
+    ]},
+    perf:{ spendMinor:41800, conversions:63, impressions:52104, ageDays:9, learningStatus:'SUCCESS',
+      attributionSettings:['7d_click'], effectiveStatus:'ACTIVE', impressionsLast24h:6108, cpaMinor:663 },
+    verdict:'SCALE',
+    plain:'Scaled. 92% probable it beats the incumbent, and only 12% probable it is worse than the £22.00 target. Daily budget raised £74.00 → £88.00 (+18.9%, inside the ±20% step cap; write 1 of 2 for today, at 09:14 account time).',
+    reason:'P(better than ad_23861204471190283) = 92% ≥ 85% over 63 conversions, and it is not confidently worse than the brand\'s target CPA of 2200 (P(CPA > 2640) = 12%).',
+    ref:'ad_23861204471190283', action:'Budget write applied 09:14. Next write not before tomorrow — two per day, none after midday.',
+  },
+  {
+    adId:'ad_120213994417650', brandId:'loft-ledger', adSetId:'120213994410221',
+    name:'loft-ledger|website_lead|paperwork-dread|dad-th-psd-9x16',
+    angleId:'paperwork-dread', angleStatement:'The forms are the reason you have not moved',
+    hook:'“Three minutes. No credit pull. Then decide.”',
+    genome:{ awarenessStage:'solution_aware', mechanic:'trojan_horse', hookTactic:'direct_address',
+      primaryTrigger:'pain_agitation', template:'problem_solution_demo', assetType:'high_production',
+      spokespersonType:'expert', pacing:'moderate', captionStyle:'burned_in_word_by_word', aspectRatio:'9:16',
+      durationBucket:'s30_60', musicPresence:'meta_sound_collection', dominantColour:'blue',
+      emotionalRegister:'authoritative', offerType:'none', cta:'GET_QUOTE' },
+    policy:{ verdict:'WARN', complete:true, stagesRun:7, findings:[
+      { ruleId:'special-ad-category.certification-precondition', severity:'WARN', policy:'Discriminatory Practices',
+        message:'Brand declares CREDIT. Error 2859024 ("Certification Required") cannot be cleared by any API call — a business admin must accept the non-discrimination policy in Business Manager, and until they do, every ad in these categories is blocked.',
+        remedy:'Confirm the certification was accepted at onboarding, and that special_ad_category_country is set explicitly.' },
+      { ruleId:'special-ad-category.credit-deprecated', severity:'WARN', policy:'Discriminatory Practices',
+        message:'CREDIT is the deprecated special ad category, superseded by FINANCIAL_PRODUCTS_SERVICES on 2025-01-14 for US-based advertisers and US-targeted campaigns. It still validates, which is why old code keeps using it.',
+        remedy:'Change the brand to FINANCIAL_PRODUCTS_SERVICES.' },
+    ]},
+    perf:{ spendMinor:288400, conversions:26, impressions:141220, ageDays:16, learningStatus:'SUCCESS',
+      attributionSettings:['7d_click'], effectiveStatus:'ACTIVE', impressionsLast24h:9330, cpaMinor:11092 },
+    verdict:'HOLD',
+    plain:'Held, and deliberately not scaled. It is the best ad in its slate and still 84% likely to be worse than the $90.00 target lead by more than 20%. The system refuses to put more budget behind the best of a losing set — the fix is the offer, the creative or the target.',
+    reason:'P(better than ad_120213994417211) = 89% ≥ 85%, but P(CPA > 10800 minor units — 1.20 × the brand\'s target of 9000) = 84% ≥ 80%. It leads a slate that is losing money; refusing to put more budget behind the best of a bad set. The fix is the offer, the creative or the target — not the budget.',
+    ref:'ad_120213994417211', action:'No budget write. Offer test queued: this brand has never run anything but an evergreen offer.',
+  },
+  {
+    adId:'ad_120214788311904', brandId:'nordhavn-supply', adSetId:'120215559034810',
+    name:'nordhavn-supply|website_purchase|repair-not-replace|sty-rf-fnd-9x16',
+    angleId:'repair-not-replace', angleStatement:'You should not have to buy this twice',
+    hook:'“Send it back. We will re-stitch it.”',
+    genome:{ awarenessStage:'unaware', mechanic:'reframe', hookTactic:'storytelling',
+      primaryTrigger:'contrarian', secondaryTrigger:'social_proof', template:'founder_story', assetType:'ugc',
+      spokespersonType:'founder', pacing:'slow', captionStyle:'burned_in_static', aspectRatio:'9:16',
+      durationBucket:'s30_60', musicPresence:'library', dominantColour:'earth_neutral',
+      emotionalRegister:'warm_nostalgic', offerType:'guarantee', cta:'LEARN_MORE' },
+    policy:{ verdict:'PASS', complete:true, stagesRun:7, findings:[] },
+    perf:{ spendMinor:31200, conversions:6, impressions:22740, ageDays:4, learningStatus:'LEARNING',
+      attributionSettings:['7d_click'], effectiveStatus:'ACTIVE', impressionsLast24h:0, cpaMinor:5200 },
+    verdict:'HOLD',
+    plain:'Held, and not judged at all. Three gates stopped it before any statistic ran. It is four days old against a seven-day attribution window, its ad set is still in the learning phase, and it has had zero impressions in 24 hours — starved by the other ad in its ad set yesterday, and then delivering nothing at all after 03:12. Zero delivery is a fact about the account, not about the creative, so no posterior was updated from these rows.',
+    reason:'gated: LEARNING — ad set 120215559034810 is in LEARNING. Delivery is deliberately unstable there and the cost data is not representative; judging it now both misreads the ad and pays for a second learning reset when we act. | NO_DELIVERY — zero impressions in the last 24h while ACTIVE. That is a delivery problem — an unfunded account, a rejected creative, a starved ad set — and NOT evidence about the ad. | MIN_AGE — age 4d < 7d (the attribution click window). Its conversions have not finished arriving, so any CPA comparison is biased against it.',
+    ref:null, action:'Nothing until the account is funded and the ad set leaves learning.',
+  },
+  {
+    adId:'ad_23861204471188902', brandId:'meridian-dental', adSetId:'23861204470880283',
+    name:'meridian-dental|instant_form_lead|missing-tooth-avoidance|spr-sw-sps-4x5',
+    angleId:'missing-tooth-avoidance', angleStatement:'You stopped smiling in photographs',
+    hook:'“1,900 consultations booked in Greater Manchester.”',
+    genome:{ awarenessStage:'product_aware', mechanic:'social_witness', hookTactic:'social_proof',
+      primaryTrigger:'social_proof', template:'social_proof_stack', assetType:'product_image_with_text',
+      spokespersonType:'none', pacing:'static', captionStyle:'none', aspectRatio:'4:5',
+      durationBucket:'static', musicPresence:'none', dominantColour:'teal',
+      emotionalRegister:'authoritative', offerType:'evergreen', cta:'SIGN_UP' },
+    policy:{ verdict:'PASS', complete:true, stagesRun:7, findings:[] },
+    perf:{ spendMinor:96400, conversions:141, impressions:210880, ageDays:34, learningStatus:'SUCCESS',
+      attributionSettings:['7d_click'], effectiveStatus:'ACTIVE', impressionsLast24h:11402, cpaMinor:684 },
+    verdict:'ITERATE',
+    plain:'Iterating. Meta’s own fatigue signal says cost per result is now at least double this account’s past ads — a benchmark we do not have and cannot compute — so it overrides the HOLD and queues a variant. The angle is held constant; the hook and the first three seconds are regenerated.',
+    reason:'Meta reports CREATIVE_FATIGUE (cost per result at least twice past ads), overriding HOLD: P(worse by >20%) = 44% (kill at 80%), P(better) = 31% (scale at 85%) against ad_23861204471190283. Probably worse, not confidently so by enough.',
+    ref:'ad_23861204471190283', action:'Variant queued (2 of 6 hook cells for this angle are still unexplored). Original stays live until the variant clears its gates.',
+  },
+  {
+    adId:'ad_23861204471191055', brandId:'meridian-dental', adSetId:'23861204470880283',
+    name:'meridian-dental|instant_form_lead|cost-uncertainty|pra-ia-lsi-9x16',
+    angleId:'cost-uncertainty', angleStatement:'Nobody will tell you what it costs',
+    hook:'“What an implant actually costs in Manchester.”',
+    genome:{ awarenessStage:'solution_aware', mechanic:'implied_answer', hookTactic:'price_anchor',
+      primaryTrigger:'curiosity_gap', template:'listicle', assetType:'text_only', spokespersonType:'none',
+      pacing:'fast', captionStyle:'burned_in_word_by_word', aspectRatio:'9:16', durationBucket:'s6_15',
+      musicPresence:'trending', dominantColour:'mono_dark', emotionalRegister:'deadpan_dry',
+      offerType:'evergreen', cta:'SIGN_UP' },
+    policy:{ verdict:'PASS', complete:true, stagesRun:7, findings:[] },
+    perf:{ spendMinor:38900, conversions:58, impressions:47210, ageDays:11, learningStatus:'SUCCESS',
+      attributionSettings:['7d_click'], effectiveStatus:'ACTIVE', impressionsLast24h:5220, cpaMinor:671 },
+    verdict:'EQUIVALENT',
+    plain:'Equivalent, and powered enough to say so. 94% of the posterior sits inside ±20% of the incumbent’s CPA on 58 versus 63 conversions, against the 44 per arm the comparison needs. It stays live and stops being re-tested — churning it would reset the ad set’s learning phase for no expected gain.',
+    reason:'94% of the posterior lies within ±20% of ad_23861204471190283\'s CPA, and the comparison is powered (58 and 63 conversions vs 44 required per arm). Not distinguishable from ad_23861204471190283 — stop re-litigating it.',
+    ref:'ad_23861204471190283', action:'Retired from the test slate, left in delivery. Its attributes still feed the attribute model.',
+  },
+  {
+    adId:'(never published)', brandId:'loft-ledger', adSetId:'—',
+    name:'loft-ledger|website_lead|rate-drop-window|urg-be-ofl-9x16',
+    angleId:'rate-drop-window', angleStatement:'The window closes before you decide',
+    hook:'“Put $340 a month back in your pocket before rates move.”',
+    genome:{ awarenessStage:'most_aware', mechanic:'borrowed_enemy', hookTactic:'urgency',
+      primaryTrigger:'urgency_stakes', secondaryTrigger:'pain_agitation', template:'offer_led',
+      assetType:'product_image_with_text', spokespersonType:'none', pacing:'fast',
+      captionStyle:'burned_in_word_by_word', aspectRatio:'9:16', durationBucket:'s6_15',
+      musicPresence:'meta_sound_collection', dominantColour:'red', emotionalRegister:'urgent',
+      offerType:'promo', cta:'APPLY_NOW' },
+    policy:{ verdict:'BLOCK', complete:true, stagesRun:7, findings:[
+      { ruleId:'unrealistic-outcomes.income-promise', severity:'BLOCK', policy:'Unrealistic Outcomes',
+        message:'Promises a specific income. Unrealistic Outcomes explicitly covers "economic opportunity" claims.',
+        remedy:'Remove the figure. Describe the offer, not an earnings outcome.', span:'“Put $340 a month back in your pocket”' },
+      { ruleId:'claim-set.unsubstantiated-assertion', severity:'BLOCK', policy:'Brand claim set',
+        message:'Unsubstantiated assertion: "Put $340 a month back in your pocket before rates move." (money marker, comparative; markers: $340, a month). Nothing outside claims.substantiated may be asserted. Closest approved claim (18% token overlap): "No origination fee on conforming loans".',
+        remedy:'Rewrite the sentence to say no more than "No origination fee on conforming loans", or have a human add this claim to claims.substantiated with its evidence. Numbers and efficacy words must match the approved claim exactly.', span:'whole sentence' },
+      { ruleId:'superlatives.absolute', severity:'WARN', policy:'Unacceptable Business Practices',
+        message:'Absolute superlative. Unacceptable Business Practices forbids "deceptive or exaggerated claims about the success of a product or service"; an unqualified #1/best/only claim is exaggerated unless it is substantiated.',
+        remedy:'Either substantiate it (add it to claims.substantiated with its evidence) or qualify/remove it.', span:'“the only broker that…”' },
+    ]},
+    perf:null,
+    verdict:'BLOCKED',
+    plain:'Never published, and generation for this angle is now halted. Two rewrite attempts both came back with the same income promise, which spends the two-attempt remediation budget. The system stops rather than trying a third time: a generate → reject → regenerate loop accumulates violations, and violations are what escalate to an account-level restriction.',
+    reason:'screenCreative(loft-ledger, ln-7a41c9) = BLOCK after 7/7 stages. Remediation attempts 2 of 2 used; lineage halted. mayPublish(report) = false.',
+    ref:null, action:'Escalated to the operator — see escalation 3. A human decides whether the claim can be substantiated.',
+  },
+];
+
+/* ------------------------------------------------------------ learning */
+const LEARNING = {
+  'nordhavn-supply': {
+    window:'rolling 90 days, ending yesterday 23:59 (account timezone America/Los_Angeles)',
+    creativesInModel:56, spendInModelMinor:4180000, attributionNote:'7d_click rows only. Three ad sets on a 1d_click setting were excluded rather than pooled — rows attributed differently are different random variables and must not be aggregated.',
+    findings:[
+      { dim:'hookTactic', level:'myth_busting', effect:-0.34, n:12, spendMinor:1840000, conf:0.93, act:'acting',
+        note:'Largest single effect in the model and it survives holding template and asset type fixed. 4 of the last 6 briefs used it.' },
+      { dim:'assetType', level:'ugc', effect:-0.22, n:19, spendMinor:3120000, conf:0.88, act:'acting',
+        note:'Consistent with the published hit-rate leaderboard, where the top of the list is text-forward and UGC-forward rather than high production. Generation weight ×1.6.' },
+      { dim:'mechanic', level:'implied_answer', effect:-0.19, n:11, spendMinor:1490000, conf:0.86, act:'acting',
+        note:'The concept layer most tagging schemas do not carry. Worth the most because nothing else explains this variance.' },
+      { dim:'durationBucket', level:'s30_60', effect:0.41, n:7, spendMinor:820000, conf:0.89, act:'acting',
+        note:'Suppressed for prospecting; still allowed at BOF, where a longer form has somewhere to be. Note the sample is small — the effect is large enough to act on anyway because the cost of being wrong is one week of generation.' },
+      { dim:'offerType', level:'bundle', effect:-0.17, n:9, spendMinor:960000, conf:0.71, act:'watching',
+        note:'Below the acting threshold (0.85). Offer is the cheapest attribute to change and the largest swing, so two more bundle creatives are scheduled rather than waiting for it to resolve itself.' },
+      { dim:'captionStyle', level:'burned_in_word_by_word', effect:-0.09, n:22, spendMinor:2740000, conf:0.64, act:'watching',
+        note:'Small effect, wide interval, plenty of data — the honest reading is "probably slightly better, not worth constraining generation over".' },
+      { dim:'spokespersonType', level:'founder', effect:0.28, n:6, spendMinor:410000, conf:0.58, act:'insufficient',
+        note:'Six creatives. Reported so it is visible, not acted on: below 10 creatives a per-level estimate is noise dressed as a finding.' },
+      { dim:'pacing', level:'rapid', effect:-0.06, n:14, spendMinor:1120000, conf:0.55, act:'confounded',
+        note:'86% of rapid-paced creatives are also UGC, so this level cannot be separated from assetType=ugc in the current data. Reported as confounded rather than as an effect. Two rapid non-UGC creatives are queued to break the collinearity.' },
+      { dim:'dominantColour', level:'(all 12 levels)', effect:0, n:41, spendMinor:3560000, conf:0.12, act:'nothing',
+        note:'41 creatives spread across the colour families and no level is distinguishable from zero. This is a real result: colour is not doing anything here, and the model will stop spending variance budget on it.' },
+    ],
+    angles:{
+      accountCreativesWithSpend:56, accountSpendUsd:41800,
+      rows:[
+        { id:'bag-outlives-you', statement:'Your bag will outlive your car', anchorType:'pain', status:'proven',
+          creativesWithSpend:14, winners:2, midRange:9, losers:3, spendUsd:14900, coverage:0.62 },
+        { id:'airport-shame', statement:'Everyone’s bag looks the same at baggage claim', anchorType:'desire', status:'testing',
+          creativesWithSpend:11, winners:1, midRange:7, losers:3, spendUsd:6100, coverage:0.34 },
+        { id:'repair-not-replace', statement:'You should not have to buy this twice', anchorType:'pain', status:'testing',
+          creativesWithSpend:12, winners:0, midRange:9, losers:3, spendUsd:11200, coverage:0.48 },
+        { id:'made-in-oregon', statement:'Made twenty minutes from here', anchorType:'desire', status:'testing',
+          creativesWithSpend:13, winners:0, midRange:6, losers:7, spendUsd:4200, coverage:0.55 },
+        { id:'weekend-carry', statement:'One bag, Friday to Monday', anchorType:'desire', status:'proposed',
+          creativesWithSpend:6, winners:0, midRange:4, losers:2, spendUsd:1450, coverage:0.19 },
+      ],
+    },
+    exploration:{ promotional:0.63, interrupt:0.24, unclustered:0.13 },
+  },
+  'meridian-dental': {
+    window:'rolling 90 days, ending yesterday 23:59 (account timezone Europe/London)',
+    creativesInModel:31, spendInModelMinor:1980000,
+    attributionNote:'7d_click rows only. Lead counts are Meta-reported: the leads_retrieval scope is missing, so nothing here is reconciled against the practice CRM. Treat every CPA on this screen as an upper bound on quality.',
+    findings:[
+      { dim:'hookTactic', level:'question', effect:-0.29, n:11, spendMinor:640000, conf:0.90, act:'acting',
+        note:'Consistent across both awareness stages it has run in. The interrogative opener is now the default for problem-aware briefs on this brand.' },
+      { dim:'assetType', level:'text_only', effect:-0.24, n:10, spendMinor:410000, conf:0.87, act:'acting',
+        note:'The cheapest asset the pipeline can make is beating produced video on a lead objective. Stage-1 discovery moved to text-only; video is reserved as a stage-2 upgrade for an angle that has already proved out.' },
+      { dim:'emotionalRegister', level:'calm_reassuring', effect:-0.18, n:13, spendMinor:730000, conf:0.83, act:'watching',
+        note:'Just under the acting threshold. Plausible on its face for dentistry, which is exactly the reason to hold it to the same bar as everything else.' },
+      { dim:'offerType', level:'promo', effect:0.33, n:5, spendMinor:210000, conf:0.61, act:'insufficient',
+        note:'Discounting a free consultation reads as a downgrade of the free consultation. Five creatives is not enough to say so — but it is enough to stop generating more until the evergreen frame is exhausted.' },
+      { dim:'aspectRatio', level:'4:5', effect:-0.04, n:24, spendMinor:1420000, conf:0.31, act:'nothing',
+        note:'No detectable difference against 9:16 at this volume. Both stay in rotation; placement optimisation is Meta\'s job, not ours.' },
+    ],
+    angles:{
+      accountCreativesWithSpend:31, accountSpendUsd:19800,
+      rows:[
+        { id:'missing-tooth-avoidance', statement:'You stopped smiling in photographs', anchorType:'pain', status:'proven',
+          creativesWithSpend:12, winners:2, midRange:8, losers:2, spendUsd:9400, coverage:0.71 },
+        { id:'cost-uncertainty', statement:'Nobody will tell you what it costs', anchorType:'pain', status:'testing',
+          creativesWithSpend:11, winners:1, midRange:8, losers:2, spendUsd:5900, coverage:0.42 },
+        { id:'chair-fear', statement:'It is not the drill, it is the not knowing', anchorType:'pain', status:'testing',
+          creativesWithSpend:8, winners:1, midRange:5, losers:2, spendUsd:3100, coverage:0.28 },
+      ],
+    },
+    exploration:{ promotional:0.41, interrupt:0.38, unclustered:0.21 },
+  },
+  'loft-ledger': {
+    window:'rolling 90 days, ending yesterday 23:59 (account timezone America/New_York)',
+    creativesInModel:18, spendInModelMinor:2410000,
+    attributionNote:'7d_click rows only. CREDIT special-ad-category targeting is forced (age 18-65+, no exclusions, 15-mile minimum radius, no lookalikes), so no audience attribute varies in this data — every finding below is a creative finding by construction.',
+    findings:[
+      { dim:'template', level:'problem_solution_demo', effect:-0.21, n:7, spendMinor:1090000, conf:0.79, act:'watching',
+        note:'Just under the bar, and the sample is thin because this brand generates slowly under the claim set. Two more are scheduled.' },
+      { dim:'offerType', level:'none', effect:0, n:16, spendMinor:2210000, conf:0.09, act:'nothing',
+        note:'16 of 18 creatives carry no offer, so offer type is effectively a constant here and nothing can be learned from it. The finding is that the brand has never tested the highest-leverage attribute it has.' },
+      { dim:'hookTactic', level:'urgency', effect:0.19, n:4, spendMinor:280000, conf:0.44, act:'insufficient',
+        note:'Also the tactic whose two most recent expressions were blocked on unrealistic-outcomes.income-promise. Urgency in a lending vertical keeps walking into the rule pack; the planner is steering away from it.' },
+    ],
+    angles:{
+      accountCreativesWithSpend:18, accountSpendUsd:24100,
+      rows:[
+        { id:'paperwork-dread', statement:'The forms are the reason you have not moved', anchorType:'pain', status:'proven',
+          creativesWithSpend:10, winners:1, midRange:7, losers:2, spendUsd:15200, coverage:0.44 },
+        { id:'rate-drop-window', statement:'The window closes before you decide', anchorType:'pain', status:'retired',
+          creativesWithSpend:5, winners:0, midRange:3, losers:2, spendUsd:5400, coverage:0.22 },
+        { id:'first-home-permission', statement:'You are allowed to ask what you can afford', anchorType:'desire', status:'testing',
+          creativesWithSpend:3, winners:0, midRange:2, losers:1, spendUsd:3500, coverage:0.11 },
+      ],
+    },
+    exploration:{ promotional:0.29, interrupt:0.52, unclustered:0.19 },
+  },
+};
+</script>
+
+<script>
+"use strict";
+/* =====================================================================
+   Rendering
+   ===================================================================== */
+const $ = (sel, root) => (root || document).querySelector(sel);
+const $$ = (sel, root) => Array.prototype.slice.call((root || document).querySelectorAll(sel));
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+const nf = (n, d) => n.toLocaleString('en-US', { minimumFractionDigits: d || 0, maximumFractionDigits: d === undefined ? 0 : d });
+function brandCur(b) { const c = CURRENCIES[b.currency] || CURRENCIES.USD; return { code:b.currency, symbol:c.symbol, offset:c.offset }; }
+function bmoney(b, minor) { return moneyMinor(minor, brandCur(b)); }
+
+const SEV_VAR = { critical:'var(--crit)', warning:'var(--warn)', ok:'var(--good)' };
+const VERDICT_GLYPH = { SCALE:'▲', KILL:'✕', HOLD:'▬', ITERATE:'↻', EQUIVALENT:'≡', BLOCKED:'⊘' };
+const VERDICT_TONE = { SCALE:'good', KILL:'crit', HOLD:'neutral', ITERATE:'warn', EQUIVALENT:'neutral', BLOCKED:'crit' };
+const POLICY_TONE = { PASS:'good', WARN:'warn', BLOCK:'crit' };
+const STATUS_TONE = { running:'good', degraded:'warn', halted:'crit', blocked:'crit' };
+
+function pill(text, tone, glyph) {
+  return `<span class="pill ${tone}">${glyph ? `<span class="glyph">${glyph}</span>` : ''}${esc(text)}</span>`;
+}
+function tuple(spec) {
+  const parts = [
+    `objective            = ${spec.objective}`,
+    `destination_type     = ${spec.destinationType === undefined ? '(omitted — deliberate)' : spec.destinationType}`,
+    `optimization_goal    = ${spec.optimizationGoal}`,
+    `billing_event        = ${spec.billingEvent}`,
+    `promoted_object      = ${spec.promotedObject}`,
+  ];
+  return parts.join('\n');
+}
+
+/* ------------------------------------------------------------ 01 Overview */
+function renderOverview() {
+  const open = ESCALATIONS.length;
+  const crit = ESCALATIONS.filter((e) => e.sev === 'critical').length;
+  const liveAds = BRANDS.reduce((a, b) => a + b.liveAds, 0);
+  const pausedTotal = BRANDS.reduce((a, b) => a + b.pausedByMeta, 0);
+  const dec = { SCALE:0, HOLD:0, KILL:0, ITERATE:0, EQUIVALENT:0 };
+  let gated = 0;
+  BRANDS.forEach((b) => { Object.keys(dec).forEach((k) => { dec[k] += b.decisions[k]; }); gated += b.gatedHolds; });
+  const spendByCur = {};
+  BRANDS.forEach((b) => {
+    const c = brandCur(b);
+    spendByCur[c.code] = spendByCur[c.code] || { spent:0, envelope:0, sym:c.symbol, offset:c.offset };
+    spendByCur[c.code].spent += b.spendTodayMinor;
+    spendByCur[c.code].envelope += b.spend.dailyBudgetMinor;
+  });
+  const spendCells = Object.keys(spendByCur).map((code) => {
+    const s = spendByCur[code];
+    return `<span class="mono">${s.sym}${nf(s.spent / s.offset, 2)}</span><span class="dim mono"> / ${s.sym}${nf(s.envelope / s.offset, 2)} ${code}</span>`;
+  }).join('<br>');
+
+  const escHtml = ESCALATIONS.map((e) => {
+    const b = e.brandId ? brandById(e.brandId) : null;
+    return `
+    <div class="esc"><div class="esc-row" style="--sev:${SEV_VAR[e.sev]}">
+      <div class="esc-stripe"></div>
+      <div class="esc-main">
+        <div class="esc-top">
+          ${pill(e.sev === 'critical' ? 'Critical' : 'Warning', e.sev === 'critical' ? 'crit' : 'warn')}
+          <span class="esc-title">${esc(e.title)}</span>
+          <span class="esc-meta">${esc(e.age)} · since ${esc(e.since)}</span>
+        </div>
+        <div class="small mono dim" style="margin-bottom:5px">${esc(e.code)} · ${b ? esc(b.name) : 'all brands'}</div>
+        <div class="esc-detail small">${esc(e.detail)}</div>
+        <div class="esc-ask"><span class="label">What it needs from you</span>${esc(e.ask)}</div>
+        <div class="esc-foot">${e.blocks.map((x) => `<span class="chip">${esc(x)}</span>`).join('')}</div>
+      </div>
+    </div></div>`;
+  }).join('');
+
+  const rows = BRANDS.map((b) => {
+    const c = brandCur(b);
+    const envelope = b.spend.dailyBudgetMinor;
+    const trackMax = envelope * 1.75;
+    const pct = Math.min(100, (b.spendTodayMinor / trackMax) * 100);
+    const share = b.spendTodayMinor / envelope;
+    const fillTone = b.status === 'halted' || b.status === 'blocked' ? 'crit' : (share > 1 ? 'warn' : 'good');
+    const decChips = ['SCALE','KILL','ITERATE','EQUIVALENT','HOLD']
+      .filter((k) => b.decisions[k] > 0)
+      .map((k) => `<span class="chip"><span class="v">${VERDICT_GLYPH[k]} ${b.decisions[k]}</span> ${k.toLowerCase()}</span>`)
+      .join('') || '<span class="dim small">no decisions — nothing delivered</span>';
+    return `
+    <tr>
+      <td>
+        <div style="font-weight:600">${esc(b.name)}</div>
+        <div class="mono tiny dim">${esc(b.id)} · ${esc(b.adAccountId)}</div>
+      </td>
+      <td class="nowrap">
+        ${pill(b.status, STATUS_TONE[b.status])}
+        <div class="tiny dim" style="margin-top:3px;max-width:22ch">${esc(b.statusText)}</div>
+      </td>
+      <td style="min-width:210px">
+        <div class="mono small"><b>${c.symbol}${nf(b.spendTodayMinor / c.offset, 2)}</b> <span class="dim">of ${c.symbol}${nf(envelope / c.offset, 2)}</span></div>
+        <div class="meter" style="margin-top:5px">
+          <i class="${fillTone}" style="width:${pct.toFixed(1)}%"></i>
+          <b style="left:57.1%"></b><b class="dash" style="left:100%"></b>
+        </div>
+        <div class="meter-legend"><span>envelope at the solid tick</span><span>175% overdelivery ceiling at the dashed</span></div>
+      </td>
+      <td class="r num">${b.liveAds}${b.pausedByMeta ? `<div class="tiny" style="color:var(--crit)">${b.pausedByMeta} paused by Meta</div>` : ''}</td>
+      <td>${decChips}${b.gatedHolds ? `<div class="tiny dim" style="margin-top:2px">${b.gatedHolds} of the holds never reached a statistic — a gate stopped them</div>` : ''}</td>
+      <td class="r num">${ESCALATIONS.filter((e) => e.brandId === b.id).length}</td>
+    </tr>`;
+  }).join('');
+
+  return `
+  <div class="screen-head">
+    <h1>Overview</h1>
+    <p class="lede">What the system did with your money in the last 24 hours, and what it cannot proceed without.
+      Figures are demo data; no live ad account is connected.</p>
+  </div>
+
+  <div class="grid-3" style="margin-bottom:16px">
+    <div class="kpi ${crit ? 'is-crit' : ''}">
+      <div class="label">Escalations open</div>
+      <div class="v">${open} <small>· ${crit} critical</small></div>
+      <div class="sub">Publishing is halted while any critical escalation stands</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Spend today vs envelope</div>
+      <div class="v" style="font-size:15px;line-height:1.45">${spendCells}</div>
+      <div class="sub">Not converted across currencies — an FX rate would be invented</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Ads live</div>
+      <div class="v">${liveAds} <small>· ${pausedTotal} paused by Meta</small></div>
+      <div class="sub">Across ${BRANDS.length} brands and ${BRANDS.reduce((a, b) => a + b.adSets, 0)} ad sets</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Decisions, last 24h</div>
+      <div class="v">${dec.SCALE + dec.HOLD + dec.KILL + dec.ITERATE + dec.EQUIVALENT}</div>
+      <div class="sub">${dec.SCALE} scale · ${dec.KILL} kill · ${dec.ITERATE} iterate · ${dec.EQUIVALENT} equivalent · ${dec.HOLD} hold (${gated} gated)</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Escalation queue</h2>
+      <span class="dim small">the system stopped and is asking — everything here is blocking something</span>
+      <span class="spacer"></span>
+      ${pill(`${crit} critical`, 'crit')} ${pill(`${open - crit} warning`, 'warn')}
+    </div>
+    <div class="panel-body tight">${escHtml}</div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h2>Brands</h2><span class="dim small">spend against envelope, delivery, and what was decided</span></div>
+    <div class="panel-body tight scroll-x">
+      <table class="grid">
+        <thead><tr>
+          <th>Brand</th><th>State</th><th>Spend today</th><th class="r">Live ads</th>
+          <th>Decided in the last 24h</th><th class="r">Escalations</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h2>Loop status</h2></div>
+    <div class="panel-body">
+      <div class="note-block plain">
+        The measure → decide → act loop last completed at <span class="mono">06:00 UTC</span> against Insights that were
+        already <span class="mono">7h 19m</span> stale, because the access token died at 22:41 the night before. It ran
+        anyway and produced only gated HOLDs, which is the correct behaviour: a decision layer that cannot see fresh rows
+        refuses rather than guessing. Nothing was published, no budget was written except one queued step, and no ad was
+        paused by this system today.
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ------------------------------------------------------------ 02 Brands */
+function renderBrands() {
+  const cards = BRANDS.map((b) => {
+    const spec = ARCHETYPES[b.archetype];
+    const c = brandCur(b);
+    const unverified = spec.confidence === 'inferred';
+    const restricted = b.specialAdCategories.filter((x) => ['HOUSING','EMPLOYMENT','CREDIT','FINANCIAL_PRODUCTS_SERVICES'].indexOf(x) >= 0);
+    const dest = Object.keys(b.destination).map((k) => `<div class="chip"><span class="k">${esc(k)}</span><span class="v">${esc(b.destination[k])}</span></div>`).join('');
+    const problems = [];
+    if (restricted.length) problems.push(`${restricted.join(', ')} silently rewrites targeting: age forced to 18-65+, no gender selection, no location exclusion, 15-mile minimum radius, no lookalikes.`);
+    if (!b.claims.likenessRightsConfirmed) problems.push('likenessRightsConfirmed is false — the pipeline will refuse to generate any human presenter for this brand.');
+    if (b.pageId === '—') problems.push('No Page assigned. This archetype promotes a page object, so nothing can be created.');
+    return `
+    <div class="panel">
+      <div class="panel-head">
+        <h2>${esc(b.name)}</h2>
+        <span class="mono tiny dim">${esc(b.id)}</span>
+        <span class="spacer"></span>
+        ${pill(b.archetype, unverified ? 'warn' : 'accent')}
+        ${unverified ? pill('tuple unverified', 'warn') : pill('tuple documented', 'good')}
+      </div>
+      <div class="panel-body">
+        <p class="small muted" style="max-width:80ch">${esc(b.proposition)}</p>
+        <div class="grid-2">
+          <div>
+            <div class="label">Resolved Meta tuple</div>
+            <pre class="tuple" style="white-space:pre-wrap">${esc(tuple(spec))}</pre>
+            <div class="${unverified ? 'note-block' : 'note-block plain'}" style="font-size:12px">
+              <b>${unverified ? 'UNVERIFIED — ' : 'Documented. '}</b>${esc(spec.note)}
+            </div>
+            <div class="label" style="margin-top:12px">Destination (promoted_object = ${esc(spec.promotedObject)})</div>
+            <div>${dest}</div>
+            <div class="label" style="margin-top:10px">Identity</div>
+            <div>
+              <span class="chip"><span class="k">page</span><span class="v">${esc(b.pageId)}</span></span>
+              <span class="chip"><span class="k">ad account</span><span class="v">${esc(b.adAccountId)}</span></span>
+              ${b.instagramUserId ? `<span class="chip"><span class="k">ig user</span><span class="v">${esc(b.instagramUserId)}</span></span>`
+                : '<span class="chip"><span class="k">ig user</span><span class="v">page-backed fallback</span></span>'}
+              <span class="chip"><span class="k">countries</span><span class="v">${b.countries.join(', ')}</span></span>
+            </div>
+          </div>
+          <div>
+            <div class="label">Spend envelope <span class="dim">(minor units, ${esc(c.code)})</span></div>
+            <table class="grid" style="margin-bottom:10px">
+              <tbody>
+                <tr><td>dailyBudgetMinor</td><td class="r mono">${nf(b.spend.dailyBudgetMinor)}</td><td class="r mono dim">${c.symbol}${nf(b.spend.dailyBudgetMinor / c.offset, 2)}</td></tr>
+                <tr><td>maxDailyBudgetMinor <span class="dim">hard ceiling</span></td><td class="r mono">${nf(b.spend.maxDailyBudgetMinor)}</td><td class="r mono dim">${c.symbol}${nf(b.spend.maxDailyBudgetMinor / c.offset, 2)}</td></tr>
+                <tr><td>targetCpaMinor <span class="dim">sets the kill threshold</span></td><td class="r mono">${nf(b.spend.targetCpaMinor)}</td><td class="r mono dim">${c.symbol}${nf(b.spend.targetCpaMinor / c.offset, 2)}</td></tr>
+                ${b.spend.contributionMarginMinor ? `<tr><td>contributionMarginMinor <span class="dim">sent as the CAPI event value</span></td><td class="r mono">${nf(b.spend.contributionMarginMinor)}</td><td class="r mono dim">${c.symbol}${nf(b.spend.contributionMarginMinor / c.offset, 2)}</td></tr>` : ''}
+              </tbody>
+            </table>
+            <div class="label">Claim set — the only things it may assert</div>
+            <div style="margin-bottom:6px">${b.claims.substantiated.map((x) => `<span class="chip incl"><span class="v">${esc(x)}</span></span>`).join('')}</div>
+            <div class="label">Never say</div>
+            <div style="margin-bottom:6px">${b.claims.neverSay.map((x) => `<span class="chip excl"><span class="v">${esc(x)}</span></span>`).join('')}</div>
+            <div class="label">Never show</div>
+            <div style="margin-bottom:6px">${b.claims.neverShow.map((x) => `<span class="chip excl"><span class="v">${esc(x)}</span></span>`).join('')}</div>
+            <div>
+              ${pill(`special ad category: ${b.specialAdCategories.join(', ')}`, restricted.length ? 'warn' : 'neutral')}
+              ${pill(`likeness rights ${b.claims.likenessRightsConfirmed ? 'confirmed' : 'not confirmed'}`, b.claims.likenessRightsConfirmed ? 'good' : 'warn')}
+            </div>
+          </div>
+        </div>
+        ${problems.length ? `<hr class="rule"><div class="label" style="margin-bottom:6px">Config warnings</div>${problems.map((p) => `<div class="finding" style="--sev:var(--warn)"><div class="small">${esc(p)}</div></div>`).join('')}` : ''}
+      </div>
+    </div>`;
+  }).join('');
+
+  const matrix = Object.keys(ARCHETYPES).map((k) => {
+    const s = ARCHETYPES[k];
+    const inUse = BRANDS.filter((b) => b.archetype === k).map((b) => b.id);
+    const un = s.confidence === 'inferred';
+    return `<tr>
+      <td class="nowrap"><span class="mono">${esc(s.archetype)}</span>${inUse.length ? `<div class="tiny dim">in use: ${inUse.join(', ')}</div>` : ''}</td>
+      <td class="mono nowrap">${esc(s.objective)}</td>
+      <td class="mono nowrap">${s.destinationType === undefined ? '<span class="dim">(omitted)</span>' : esc(s.destinationType)}</td>
+      <td class="mono nowrap">${esc(s.optimizationGoal)}</td>
+      <td class="mono nowrap">${esc(s.billingEvent)}</td>
+      <td class="mono nowrap">${esc(s.promotedObject)}</td>
+      <td class="nowrap">${un ? pill('unverified', 'warn') : pill('documented', 'good')}</td>
+      <td style="min-width:30ch"><span class="tiny muted">${esc(s.note)}</span></td>
+    </tr>`;
+  }).join('');
+
+  const unverifiedCount = Object.keys(ARCHETYPES).filter((k) => ARCHETYPES[k].confidence === 'inferred').length;
+
+  return `
+  <div class="screen-head">
+    <h1>Brands</h1>
+    <p class="lede">Per-brand configuration with the tuple each archetype actually resolves to. Nothing here is inferred at
+      publish time — the tuple is data, and the ones resting on an assumption say so.</p>
+  </div>
+  ${cards}
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Archetype matrix</h2>
+      <span class="dim small">the ODAX legality table, as the system holds it</span>
+      <span class="spacer"></span>
+      ${pill(`${unverifiedCount} of 9 unverified`, 'warn')}
+    </div>
+    <div class="panel-body tight scroll-x">
+      <table class="grid">
+        <thead><tr><th>Archetype</th><th>objective</th><th>destination_type</th><th>optimization_goal</th>
+          <th>billing_event</th><th>promoted_object</th><th>Confidence</th><th>Note</th></tr></thead>
+        <tbody>${matrix}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+</script>
+
+<script>
+"use strict";
+/* ------------------------------------------------------------ 03 Funnel builder */
+const FUNNEL_STATE = {
+  goal:'sales', budgetMajor:240, targetCpaMajor:32, assets:'website_traffic',
+  currency:'USD', warmPool:4200, purchases:180, warmTouched:true, purchasesTouched:true,
+  valueSpread:false,
+};
+
+function funnelControls() {
+  const goalBtns = Object.keys(EASY_GOAL_LABEL).map((g) =>
+    `<button type="button" data-goal="${g}" aria-pressed="${FUNNEL_STATE.goal === g}">${esc(EASY_GOAL_LABEL[g])}</button>`).join('');
+  const assetBtns = Object.keys(EASY_ASSETS_LABEL).map((a) =>
+    `<button type="button" data-assets="${a}" aria-pressed="${FUNNEL_STATE.assets === a}">${esc(EASY_ASSETS_LABEL[a])}</button>`).join('');
+  const sym = (CURRENCIES[FUNNEL_STATE.currency] || CURRENCIES.USD).symbol;
+  return `
+  <div class="panel">
+    <div class="panel-head"><h2>Your answers</h2><span class="dim small">four questions; everything else is measured or derived</span></div>
+    <div class="panel-body">
+      <div class="field">
+        <span class="label">1 · What do you want the ads to do?</span>
+        <div class="seg" id="goal-seg">${goalBtns}</div>
+      </div>
+      <div class="field">
+        <span class="label">2 · What have you got already?</span>
+        <div class="seg" id="assets-seg">${assetBtns}</div>
+        <div class="hint">This sets the starting assumptions below. It is the one input the system cannot measure at cold start.</div>
+      </div>
+      <div class="field">
+        <span class="label">3 · Daily budget</span>
+        <div class="budget-readout"><span id="budget-out">${sym}${nf(FUNNEL_STATE.budgetMajor, 2)}</span><span class="dim" style="font-size:14px">/day</span></div>
+        <input type="range" id="budget-range" min="5" max="1500" step="5" value="${FUNNEL_STATE.budgetMajor}">
+        <div class="ticks"><span>${sym}5</span><span>${sym}300</span><span>${sym}600</span><span>${sym}900</span><span>${sym}1,200</span><span>${sym}1,500</span></div>
+        <div class="hint">Move it. The recommendation is allowed to change, and it will.</div>
+        <div style="margin-top:8px" class="seg" id="budget-presets">
+          ${[15,45,60,120,240,500,900].map((v) => `<button type="button" data-budget="${v}">${sym}${v}</button>`).join('')}
+        </div>
+      </div>
+      <div class="field">
+        <span class="label">4 · What is a conversion worth to you?</span>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <label class="small muted">Target CPA
+            <input type="number" id="cpa-in" min="1" max="900" step="1" value="${FUNNEL_STATE.targetCpaMajor}" style="width:90px">
+          </label>
+          <label class="small muted">Currency
+            <select id="cur-in">${['USD','GBP','EUR'].map((x) => `<option ${x === FUNNEL_STATE.currency ? 'selected' : ''}>${x}</option>`).join('')}</select>
+          </label>
+        </div>
+        <div class="hint">Target CPA is the cost basis for every brand_cpa rung, and the kill threshold for every verdict.</div>
+      </div>
+      <hr class="rule">
+      <div class="label" style="margin-bottom:6px">Measured from the account</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+        <label class="small muted">30-day warm pool
+          <input type="number" id="warm-in" min="0" max="500000" step="100" value="${FUNNEL_STATE.warmPool}" style="width:110px">
+        </label>
+        <label class="small muted">Conversions, last 180d
+          <input type="number" id="purch-in" min="0" max="100000" step="10" value="${FUNNEL_STATE.purchases}" style="width:110px">
+        </label>
+      </div>
+      <label class="checkline"><input type="checkbox" id="vs-in" ${FUNNEL_STATE.valueSpread ? 'checked' : ''}> Order value has a real spread (enables the value ladder)</label>
+      <div class="hint">Blank these and the system assumes them from question 2 — and says so in the warnings, because the
+        template choice turns on both.</div>
+    </div>
+  </div>`;
+}
+
+function stageCard(rs, assessment) {
+  const s = rs.stage;
+  const a = rs.arithmetic;
+  const cur = CURRENCIES[FUNNEL_STATE.currency] || CURRENCIES.USD;
+  const bad = a.problem !== undefined;
+  const inclPools = rs.targetPools.map((p) => `<span class="chip incl"><span class="v">+</span>${esc(p.label)}</span>`).join('');
+  const incl = inclPools || (s.advantageAudience === 1 ? '<span class="chip">broad — no hard inclusion</span>' : '');
+  const sugg = rs.suggestPools.map((p) => `<span class="chip sugg"><span class="v">~</span>${esc(p.label)}</span>`).join('');
+  const excl = rs.excludePools.map((p) => `<span class="chip excl"><span class="v">−</span>${esc(p.label)}</span>`).join('');
+  return `
+  <div class="stage ${bad ? 'is-bad' : ''}">
+    <div class="stage-top">
+      <span class="pill neutral">campaign ${esc(s.campaign)}</span>
+      <h4>${esc(s.label)}</h4>
+    </div>
+    <div class="stage-body">
+      <div>
+        <div class="small dim" style="margin-bottom:4px">${esc(s.role)} · ${esc(s.budgetLevel)} budget · ${pctS(s.budgetShare)} of total</div>
+        <div class="mono" style="font-size:19px;font-weight:600">${cur.symbol}${nf(rs.dailyBudgetMinor / cur.offset, 2)}<span class="dim" style="font-size:12px;font-weight:400">/day</span></div>
+        <div style="margin:7px 0">
+          ${pill(`optimise: ${a.rungLabel}`, bad ? 'crit' : 'accent')}
+          ${a.laddered ? pill(`laddered down from ${RUNGS[a.preferredRung].label}`, 'warn') : ''}
+          ${pill(`Advantage+ audience ${s.advantageAudience ? 'on' : 'off'}`, s.advantageAudience ? 'neutral' : 'warn')}
+          ${s.maxDurationDays ? pill(`hard stop day ${s.maxDurationDays}`, 'warn') : ''}
+        </div>
+        <div class="small muted">${esc(s.purpose)}</div>
+      </div>
+      <div>
+        <span class="label">Published as</span>
+        <div class="tuple">${esc(tuple(rs.spec))}</div>
+        ${incl ? `<div class="aud-group"><span class="label">Targets</span>${incl}</div>` : ''}
+        ${sugg ? `<div class="aud-group"><span class="label">Suggestions inside Advantage+</span>${sugg}</div>` : ''}
+        ${excl ? `<div class="aud-group"><span class="label">Excludes</span>${excl}</div>` : ''}
+      </div>
+    </div>
+  </div>`;
+}
+
+function arithmeticTable(assessment) {
+  const cur = CURRENCIES[FUNNEL_STATE.currency] || CURRENCIES.USD;
+  const rows = assessment.stages.map((a) => {
+    const aff = a.eventsAffordablePerWeek;
+    const ok = a.problem === undefined;
+    const width = aff === undefined ? 100 : Math.min(100, (aff / 50) * 100);
+    return `<tr>
+      <td><b>${esc(a.label)}</b><div class="tiny dim">${pctS(a.budgetShare)} share · ${esc(a.rungLabel)}${a.laddered ? ` (down from ${RUNGS[a.preferredRung].label})` : ''}</div></td>
+      <td class="r mono">${cur.symbol}${nf(a.stageDailyMajor, 2)}</td>
+      <td class="r mono">${a.costPerEventMajor === undefined ? '—' : cur.symbol + nf(a.costPerEventMajor, 2)}</td>
+      <td class="r mono">${aff === undefined ? 'n/a' : nf(aff, 1)}</td>
+      <td class="r mono">${a.eventLimited ? 50 : '—'}</td>
+      <td style="min-width:150px">
+        ${a.eventLimited ? `<div class="arith-bar"><i class="${ok ? '' : 'short'}" style="width:${width.toFixed(1)}%"></i><b style="left:100%"></b></div>` : '<span class="tiny dim">not event-limited</span>'}
+      </td>
+      <td class="r mono">${a.stageFloorDailyMajor === undefined ? '—' : cur.symbol + nf(a.stageFloorDailyMajor, 2)}</td>
+      <td class="nowrap">${ok ? pill('clears', 'good', '✓') : pill(a.exitsLearning ? 'below its floor role' : 'never exits learning', 'crit', '✕')}</td>
+    </tr>`;
+  }).join('');
+  return `
+  <div class="scroll-x">
+    <table class="grid">
+      <thead><tr>
+        <th>Stage</th><th class="r">Daily</th><th class="r">Cost / event</th>
+        <th class="r">Events/wk it buys</th><th class="r">Needs</th><th>vs the 50 it needs</th>
+        <th class="r">Its own floor</th><th>Verdict</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+function renderFunnelResult() {
+  const cur = CURRENCIES[FUNNEL_STATE.currency] || CURRENCIES.USD;
+  CUR = { code:FUNNEL_STATE.currency, symbol:cur.symbol, offset:cur.offset };
+  const opts = {
+    goal:FUNNEL_STATE.goal,
+    dailyBudgetMinor: Math.round(FUNNEL_STATE.budgetMajor * cur.offset),
+    currency:FUNNEL_STATE.currency, currencyOffset:cur.offset,
+    targetCpaMinor: Math.round(FUNNEL_STATE.targetCpaMajor * cur.offset),
+    assets:FUNNEL_STATE.assets,
+    valueSpreadMaterial: FUNNEL_STATE.valueSpread,
+  };
+  if (FUNNEL_STATE.warmTouched) opts.warmPoolSize = FUNNEL_STATE.warmPool;
+  if (FUNNEL_STATE.purchasesTouched) opts.purchasesLast180d = FUNNEL_STATE.purchases;
+
+  const plan = resolveEasyOptions(opts);
+  const a = plan.assessment;
+  const refused = a.verdict === 'refuse';
+  const downgraded = plan.recommendation.considered.filter((c) => c.verdict === 'refuse');
+
+  let banner;
+  if (refused) {
+    banner = `<div class="banner crit"><div class="bar"></div><div class="body">
+      <h3>No structure works at ${cur.symbol}${nf(FUNNEL_STATE.budgetMajor, 2)}/day for a ${cur.symbol}${nf(FUNNEL_STATE.targetCpaMajor, 2)} ${RUNGS[primaryRungFor(plan.archetype)].label.toLowerCase()}</h3>
+      <p>Even ${esc(plan.template.name)} cannot clear the learning-phase floor. The arithmetic is below, and the honest
+      answer is to raise the budget to about ${cur.symbol}${nf(a.requiredDailyMajor, 2)}/day, lower the target, or accept
+      permanently unstable delivery.</p></div></div>`;
+  } else if (downgraded.length) {
+    banner = `<div class="banner warn"><div class="bar"></div><div class="body">
+      <h3>Build ${esc(plan.template.name)} — not the ${esc(FUNNEL_TEMPLATES[downgraded[0].templateId].name)} this budget looks like it should buy</h3>
+      <p>${esc(FUNNEL_TEMPLATES[downgraded[0].templateId].name)} was considered and refused: at
+      ${cur.symbol}${nf(FUNNEL_STATE.budgetMajor, 2)}/day one of its stages cannot reach the 50 optimisation events a week
+      Meta needs before it stops experimenting. Splitting the budget further would buy structure at the cost of the thing
+      the structure is for.</p></div></div>`;
+  } else {
+    banner = `<div class="banner good"><div class="bar"></div><div class="body">
+      <h3>Build ${esc(plan.template.name)}</h3>
+      <p>Every stage clears its own learning-phase floor at ${cur.symbol}${nf(FUNNEL_STATE.budgetMajor, 2)}/day.
+      ${esc(plan.template.who)}</p></div></div>`;
+  }
+
+  const flow = plan.stages.map((rs, i) =>
+    (i ? '<div class="flow-arrow" aria-hidden="true"></div>' : '') + stageCard(rs, a)).join('');
+
+  const consideredRows = plan.recommendation.considered.map((c) => `
+    <tr>
+      <td><b>${esc(FUNNEL_TEMPLATES[c.templateId].name)}</b><div class="tiny dim">${esc(FUNNEL_TEMPLATES[c.templateId].who)}</div></td>
+      <td class="nowrap">${c.verdict === 'build' ? pill('built', 'good', '✓') : pill('refused', 'crit', '✕')}</td>
+      <td class="small muted">${esc(c.why)}</td>
+    </tr>`).join('');
+
+  const declaredDelta = a.requiredDailyMajor - a.declaredMinViableDailyMajor;
+
+  return `
+  ${banner}
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>${esc(plan.template.name)}</h2>
+      <span class="dim small">${plan.stages.length} stage${plan.stages.length > 1 ? 's' : ''} ·
+        ${new Set(plan.template.stages.map((s) => s.campaign)).size} campaign(s) ·
+        ${cur.symbol}${nf(FUNNEL_STATE.budgetMajor, 2)}/day</span>
+      <span class="spacer"></span>
+      ${pill(`playbook floor ${money(a.declaredMinViableDailyMajor, cur)}`, 'neutral')}
+      ${pill(`arithmetic floor ${money(a.requiredDailyMajor, cur)}`, refused ? 'crit' : 'accent')}
+    </div>
+    <div class="panel-body">
+      <div class="flow">${flow}</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>The arithmetic</h2>
+      <span class="dim small">events needed per ad set per week (50) versus events this budget buys at that stage's cost per event</span>
+    </div>
+    <div class="panel-body tight">${arithmeticTable(a)}</div>
+    <div class="panel-body" style="border-top:1px solid var(--border)">
+      <div class="label" style="margin-bottom:6px">In full, as the planner wrote it</div>
+      ${a.explanation.map((l) => `<div class="arith-line">${esc(l)}</div>`).join('')}
+      ${Math.abs(declaredDelta) > 0.5 ? `<div class="note-block" style="margin-top:10px">
+        The playbook figure for ${esc(plan.template.name)} is ${money(a.declaredMinViableDailyMajor, cur)}/day; this brand's
+        own cost per conversion makes the real floor ${money(a.requiredDailyMajor, cur)}/day. Both are shown because a
+        disagreement between the research and the arithmetic is information, not an error to hide.
+      </div>` : ''}
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h2>What else was considered</h2><span class="dim small">every refusal, with the reason it was refused</span></div>
+    <div class="panel-body tight scroll-x">
+      <table class="grid"><thead><tr><th>Template</th><th>Outcome</th><th>Why</th></tr></thead><tbody>${consideredRows}</tbody></table>
+    </div>
+    ${plan.recommendation.notes.length ? `<div class="panel-body" style="border-top:1px solid var(--border)">
+      ${plan.recommendation.notes.map((n) => `<div class="note-block plain" style="margin-bottom:8px">${esc(n)}</div>`).join('')}
+    </div>` : ''}
+  </div>
+
+  <div class="grid-2">
+    <div class="panel">
+      <div class="panel-head"><h2>Before anything publishes</h2></div>
+      <div class="panel-body">
+        <div class="label" style="margin-bottom:6px">Audiences to build</div>
+        ${plan.audiencesToBuild.map((p) => `<div class="chip"><span class="v">${esc(p.kind)}</span>${esc(p.label)}${p.sizeGated ? ' · size-gated at 1,000' : ''}${p.undocumentedRule ? ' · undocumented rule' : ''}</div>`).join('')}
+        <div class="label" style="margin-top:12px;margin-bottom:6px">Warnings</div>
+        ${plan.warnings.length ? plan.warnings.map((w) => `<div class="finding" style="--sev:var(--warn)"><div class="small">${esc(w)}</div></div>`).join('')
+          : '<div class="small dim">None — every input was measured rather than assumed.</div>'}
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>How this template fails</h2></div>
+      <div class="panel-body">
+        <p class="small muted">${esc(plan.template.failureMode)}</p>
+        <div class="label" style="margin:10px 0 6px">Collapse it when</div>
+        <ul class="explain small">${plan.template.killCriteria.map((k) => `<li>${esc(k)}</li>`).join('')}</ul>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderFunnel() {
+  return `
+  <div class="screen-head">
+    <h1>Funnel builder</h1>
+    <p class="lede">A few answers resolve to a structure — or to a refusal. Every stage in a funnel is an ad set that must
+      buy about 50 optimisation events a week before Meta stops experimenting on it, so past a point, more structure means
+      less learning. The builder will say so.</p>
+  </div>
+  <div class="funnel-layout">
+    <div id="funnel-controls">${funnelControls()}</div>
+    <div id="funnel-result">${renderFunnelResult()}</div>
+  </div>`;
+}
+
+function wireFunnel() {
+  const root = $('#screen-funnel');
+  const redraw = (full) => {
+    if (full) { $('#funnel-controls', root).innerHTML = funnelControls(); wireFunnel(); }
+    $('#funnel-result', root).innerHTML = renderFunnelResult();
+  };
+  $$('#goal-seg button', root).forEach((btn) => {
+    btn.onclick = () => {
+      FUNNEL_STATE.goal = btn.dataset.goal;
+      $$('#goal-seg button', root).forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
+      redraw(false);
+    };
+  });
+  $$('#assets-seg button', root).forEach((btn) => {
+    btn.onclick = () => {
+      FUNNEL_STATE.assets = btn.dataset.assets;
+      FUNNEL_STATE.warmTouched = false; FUNNEL_STATE.purchasesTouched = false;
+      const warmDefaults = { nothing:0, video_views:0, website_traffic:1000, customers:1000 };
+      FUNNEL_STATE.warmPool = warmDefaults[FUNNEL_STATE.assets];
+      FUNNEL_STATE.purchases = FUNNEL_STATE.assets === 'customers' ? 100 : 0;
+      redraw(true);
+    };
+  });
+  const range = $('#budget-range', root);
+  if (range) {
+    range.oninput = () => {
+      FUNNEL_STATE.budgetMajor = Number(range.value);
+      const sym = (CURRENCIES[FUNNEL_STATE.currency] || CURRENCIES.USD).symbol;
+      $('#budget-out', root).textContent = `${sym}${nf(FUNNEL_STATE.budgetMajor, 2)}`;
+      redraw(false);
+    };
+  }
+  $$('#budget-presets button', root).forEach((btn) => {
+    btn.onclick = () => {
+      FUNNEL_STATE.budgetMajor = Number(btn.dataset.budget);
+      redraw(true);
+    };
+  });
+  const cpa = $('#cpa-in', root);
+  if (cpa) cpa.oninput = () => { const v = Number(cpa.value); if (v > 0) { FUNNEL_STATE.targetCpaMajor = v; redraw(false); } };
+  const curIn = $('#cur-in', root);
+  if (curIn) curIn.onchange = () => { FUNNEL_STATE.currency = curIn.value; redraw(true); };
+  const warm = $('#warm-in', root);
+  if (warm) warm.oninput = () => { FUNNEL_STATE.warmPool = Number(warm.value) || 0; FUNNEL_STATE.warmTouched = true; redraw(false); };
+  const pur = $('#purch-in', root);
+  if (pur) pur.oninput = () => { FUNNEL_STATE.purchases = Number(pur.value) || 0; FUNNEL_STATE.purchasesTouched = true; redraw(false); };
+  const vs = $('#vs-in', root);
+  if (vs) vs.onchange = () => { FUNNEL_STATE.valueSpread = vs.checked; redraw(false); };
+}
+</script>
+
+<script>
+"use strict";
+/* ------------------------------------------------------------ 04 Creative */
+const GENOME_ORDER = [
+  ['awarenessStage','awareness'], ['mechanic','mechanic'], ['hookTactic','hook tactic'],
+  ['primaryTrigger','trigger 1'], ['secondaryTrigger','trigger 2'], ['template','template'],
+  ['assetType','asset type'], ['spokespersonType','spokesperson'], ['pacing','pacing'],
+  ['captionStyle','captions'], ['aspectRatio','ratio'], ['durationBucket','duration'],
+  ['musicPresence','music'], ['dominantColour','colour'], ['emotionalRegister','register'],
+  ['offerType','offer'], ['cta','cta'],
+];
+const CREATIVE_FILTER = { brandId:'all' };
+
+function renderCreative() {
+  const list = CREATIVES.filter((c) => CREATIVE_FILTER.brandId === 'all' || c.brandId === CREATIVE_FILTER.brandId);
+  const cards = list.map((c) => {
+    const b = brandById(c.brandId);
+    const cur = brandCur(b);
+    const p = c.perf;
+    const genome = GENOME_ORDER.filter(([k]) => c.genome[k] !== undefined).map(([k, lbl]) =>
+      `<span class="chip"><span class="k">${lbl}</span><span class="v">${esc(c.genome[k])}</span></span>`).join('');
+    const findings = c.policy.findings.map((f) => `
+      <div class="finding" style="--sev:var(--${POLICY_TONE[f.severity]})">
+        <div><span class="fid">${esc(f.ruleId)}</span> ${pill(f.severity, POLICY_TONE[f.severity])}
+          <span class="tiny dim">${esc(f.policy)}</span></div>
+        ${f.span ? `<div class="tiny mono dim">match: ${esc(f.span)}</div>` : ''}
+        <div class="small muted" style="margin-top:3px">${esc(f.message)}</div>
+        <div class="small" style="margin-top:3px"><span class="label">Remedy</span> ${esc(f.remedy)}</div>
+      </div>`).join('');
+    const perfHtml = p ? `
+      <div class="perf-row">
+        <div><span class="label">Spend</span><span class="v">${cur.symbol}${nf(p.spendMinor / cur.offset, 2)}</span></div>
+        <div><span class="label">Conversions</span><span class="v">${nf(p.conversions)}</span></div>
+        <div><span class="label">CPA</span><span class="v" style="color:${p.cpaMinor > b.spend.targetCpaMinor ? 'var(--crit)' : 'var(--good)'}">${cur.symbol}${nf(p.cpaMinor / cur.offset, 2)}</span></div>
+        <div><span class="label">Target</span><span class="v dim">${cur.symbol}${nf(b.spend.targetCpaMinor / cur.offset, 2)}</span></div>
+        <div><span class="label">Impressions</span><span class="v">${nf(p.impressions)}</span></div>
+        <div><span class="label">Age</span><span class="v">${p.ageDays}d</span></div>
+      </div>
+      <div>
+        ${pill(`learning: ${p.learningStatus}`, p.learningStatus === 'SUCCESS' ? 'good' : (p.learningStatus === 'LEARNING' ? 'warn' : 'neutral'))}
+        ${pill(`status: ${p.effectiveStatus}`, p.effectiveStatus === 'ACTIVE' ? 'neutral' : 'warn')}
+        ${pill(`attribution: ${p.attributionSettings.join(', ')}`, 'neutral')}
+        ${p.impressionsLast24h === 0 ? pill('0 impressions in 24h', 'crit') : pill(`${nf(p.impressionsLast24h)} impressions in 24h`, 'neutral')}
+      </div>`
+      : `<div class="note-block" style="margin:6px 0">Never delivered. It was stopped at the policy screen, so there is no
+         performance to show — and no posterior was created, because a creative that never ran carries no evidence.</div>`;
+
+    return `
+    <div class="creative">
+      <div class="cre-top">
+        <div style="min-width:0;flex:1 1 320px">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            ${pill(c.verdict, VERDICT_TONE[c.verdict], VERDICT_GLYPH[c.verdict])}
+            ${pill(`policy ${c.policy.verdict}`, POLICY_TONE[c.policy.verdict])}
+            <span style="font-weight:600">${esc(b.name)}</span>
+            <span class="dim small">angle: ${esc(c.angleId)}</span>
+          </div>
+          <div class="cre-id" style="margin-top:4px">${esc(c.name)}</div>
+          <div class="cre-id">${esc(c.adId)}${c.adSetId !== '—' ? ` · ad set ${esc(c.adSetId)}` : ''}</div>
+        </div>
+      </div>
+      <div class="cre-grid">
+        <div>
+          <div class="label">Hook</div>
+          <div style="font-size:14.5px;margin-bottom:8px">${esc(c.hook)}</div>
+          <div class="label">Angle</div>
+          <div class="small muted" style="margin-bottom:8px">“${esc(c.angleStatement)}” — the angle is the entity the
+            bandit runs over; this creative is one expression of it.</div>
+          <div class="label" style="margin-bottom:4px">Genome</div>
+          <div>${genome}</div>
+          ${perfHtml}
+        </div>
+        <div>
+          <div class="verdict-box ${c.verdict}">
+            <div style="display:flex;align-items:center;gap:7px;margin-bottom:6px">
+              ${pill(c.verdict, VERDICT_TONE[c.verdict], VERDICT_GLYPH[c.verdict])}
+              ${c.ref ? `<span class="tiny mono dim">judged against ${esc(c.ref)}</span>` : '<span class="tiny mono dim">no reference ad</span>'}
+            </div>
+            <div class="verdict-plain">${esc(c.plain)}</div>
+            <div class="raw-reason">${esc(c.reason)}</div>
+            <div class="small" style="margin-top:8px"><span class="label">Action taken</span> ${esc(c.action)}</div>
+          </div>
+          ${findings ? `<div class="label" style="margin:12px 0 4px">Policy findings · ${c.policy.stagesRun}/7 stages ran</div>${findings}`
+            : `<div class="label" style="margin:12px 0 4px">Policy</div>
+               <div class="small muted">All 7 stages ran and found nothing. A PASS means no rule fired — it is not a
+               guarantee Meta will approve it, and nothing in this system treats it as one.</div>`}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  const counts = {};
+  CREATIVES.forEach((c) => { counts[c.verdict] = (counts[c.verdict] || 0) + 1; });
+
+  return `
+  <div class="screen-head">
+    <h1>Creative</h1>
+    <p class="lede">Every generated ad with the attributes it was built from, the policy screen it passed or failed, what it
+      did, and the verdict — with the arithmetic behind the verdict in the words the decision layer used.</p>
+  </div>
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Slate</h2>
+      <span class="dim small">${CREATIVES.length} creatives across ${new Set(CREATIVES.map((c) => c.brandId)).size} brands</span>
+      <span class="spacer"></span>
+      <div class="seg" id="cre-filter">
+        <button type="button" data-cb="all" aria-pressed="${CREATIVE_FILTER.brandId === 'all'}">All brands</button>
+        ${BRANDS.filter((b) => CREATIVES.some((c) => c.brandId === b.id)).map((b) =>
+          `<button type="button" data-cb="${b.id}" aria-pressed="${CREATIVE_FILTER.brandId === b.id}">${esc(b.name)}</button>`).join('')}
+      </div>
+    </div>
+    <div class="panel-body" style="border-bottom:1px solid var(--border);display:flex;gap:6px;flex-wrap:wrap">
+      ${Object.keys(counts).map((k) => pill(`${k} ${counts[k]}`, VERDICT_TONE[k], VERDICT_GLYPH[k])).join(' ')}
+      <span class="dim small" style="margin-left:auto">HOLD is the modal verdict by design — churning creative resets the ad set's learning phase, and the reset is paid for whether or not the change was right.</span>
+    </div>
+    <div class="panel-body tight">${cards || '<div class="panel-body dim">No creatives for this brand.</div>'}</div>
+  </div>`;
+}
+function wireCreative() {
+  $$('#cre-filter button').forEach((btn) => {
+    btn.onclick = () => { CREATIVE_FILTER.brandId = btn.dataset.cb; draw('creative'); };
+  });
+}
+
+/* ------------------------------------------------------------ 05 Learning */
+const LEARN_STATE = { brandId:'nordhavn-supply' };
+const ACT_LABEL = {
+  acting:['acting on it','good'], watching:['watching','warn'], insufficient:['not enough data','neutral'],
+  confounded:['confounded','warn'], nothing:['no effect found','neutral'],
+};
+const CLASS_LABEL = {
+  safest_bet:'Safest bet', workhorse:'Workhorse', high_variance_bet:'High-variance bet',
+  stop_generating:'Stop generating', insufficient_data:'Insufficient data',
+};
+
+function renderLearning() {
+  const b = brandById(LEARN_STATE.brandId);
+  const L = LEARNING[LEARN_STATE.brandId];
+  const cur = brandCur(b);
+
+  const findingRows = L.findings.map((f) => {
+    const [lbl, tone] = ACT_LABEL[f.act];
+    const dir = f.effect === 0 ? 'flat' : (f.effect < 0 ? 'down' : 'up');
+    const eff = f.effect === 0 ? 'no effect' : `${f.effect > 0 ? '+' : ''}${Math.round(f.effect * 100)}%`;
+    return `<tr>
+      <td class="nowrap"><span class="mono small dim">${esc(f.dim)}</span><div style="font-weight:600">${esc(f.level)}</div></td>
+      <td class="r"><span class="effect ${dir}">${eff}</span><div class="tiny dim">${f.effect === 0 ? 'on CPA' : 'CPA'}</div></td>
+      <td class="r mono">${f.n}</td>
+      <td class="r mono">${cur.symbol}${nf(f.spendMinor / cur.offset, 0)}</td>
+      <td class="nowrap">
+        <span class="conf-bar"><i style="width:${(f.conf * 100).toFixed(0)}%"></i><b style="left:85%"></b></span>
+        <span class="mono small"> ${f.conf.toFixed(2)}</span>
+      </td>
+      <td class="nowrap">${pill(lbl, tone)}</td>
+      <td class="small muted" style="min-width:34ch">${esc(f.note)}</td>
+    </tr>`;
+  }).join('');
+
+  const A = L.angles;
+  const withClass = A.rows.map((r) => {
+    const perf = { angleId:r.id, creativesWithSpend:r.creativesWithSpend, winners:r.winners, midRange:r.midRange,
+      losers:r.losers, spendUsd:r.spendUsd, accountCreativesWithSpend:A.accountCreativesWithSpend,
+      accountSpendUsd:A.accountSpendUsd };
+    return Object.assign({}, r, { cls:classifyAngle(perf), hit:hitRate(perf), sur:spendUseRatio(perf) });
+  });
+  const quadCell = (cls) => withClass.filter((r) => r.cls === cls).map((r) => `
+    <span class="angle-tag">
+      <b>${esc(r.statement)}</b>
+      <div class="st">${esc(r.id)} · hit ${(r.hit * 100).toFixed(1)}% · SUR ${r.sur.toFixed(2)} · ${r.creativesWithSpend} creatives</div>
+    </span>`).join('') || '<span class="tiny dim">empty</span>';
+  const insufficient = withClass.filter((r) => r.cls === 'insufficient_data');
+
+  const angleRows = withClass.map((r) => `
+    <tr>
+      <td><b>${esc(r.statement)}</b><div class="mono tiny dim">${esc(r.id)} · ${esc(r.anchorType)} anchor</div></td>
+      <td class="nowrap">${pill(r.status, r.status === 'proven' ? 'good' : (r.status === 'retired' ? 'crit' : 'neutral'))}</td>
+      <td class="r mono">${r.creativesWithSpend}</td>
+      <td class="r mono">${r.winners}</td>
+      <td class="r mono">${(r.hit * 100).toFixed(1)}%</td>
+      <td class="r mono">${r.sur.toFixed(2)}</td>
+      <td class="nowrap">${pill(CLASS_LABEL[r.cls], r.cls === 'safest_bet' ? 'good' : (r.cls === 'stop_generating' ? 'crit' : (r.cls === 'insufficient_data' ? 'neutral' : 'accent')))}</td>
+      <td style="min-width:150px">
+        <div class="meter"><i class="${r.coverage >= ANGLE_EXHAUSTION_COVERAGE ? 'crit' : ''}" style="width:${(r.coverage * 100).toFixed(0)}%"></i><b style="left:80%"></b></div>
+        <div class="tiny dim">${(r.coverage * 100).toFixed(0)}% of its variant cells tried · retire at 80%</div>
+      </td>
+    </tr>`).join('');
+
+  const ex = L.exploration;
+  const interruptShort = ex.interrupt < INTERRUPT_EXPLORATION_FLOOR;
+
+  return `
+  <div class="screen-head">
+    <h1>Learning</h1>
+    <p class="lede">What the system believes about <b>${esc(b.name)}</b> — as attributes, not as a leaderboard of winning
+      ads. A leaderboard tells you which file did well; an attribute finding tells you what to build next.</p>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Brand</h2>
+      <span class="spacer"></span>
+      <div class="seg" id="learn-seg">
+        ${Object.keys(LEARNING).map((id) => `<button type="button" data-lb="${id}" aria-pressed="${LEARN_STATE.brandId === id}">${esc(brandById(id).name)}</button>`).join('')}
+      </div>
+    </div>
+    <div class="panel-body">
+      <div class="grid-3">
+        <div class="kpi"><div class="label">Creatives in the model</div><div class="v">${L.creativesInModel}</div>
+          <div class="sub">${esc(L.window)}</div></div>
+        <div class="kpi"><div class="label">Spend behind the findings</div>
+          <div class="v">${cur.symbol}${nf(L.spendInModelMinor / cur.offset, 0)}</div>
+          <div class="sub">Every finding below is paid for in real delivery</div></div>
+        <div class="kpi"><div class="label">Acting on</div>
+          <div class="v">${L.findings.filter((f) => f.act === 'acting').length} <small>of ${L.findings.length}</small></div>
+          <div class="sub">The rest are visible but not steering generation</div></div>
+      </div>
+      <div class="note-block plain" style="margin-top:12px">${esc(L.attributionNote)}</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Attribute findings</h2>
+      <span class="dim small">effect on CPA against the brand average, holding the rest of the vector as fixed as the data allows</span>
+    </div>
+    <div class="panel-body tight scroll-x">
+      <table class="grid">
+        <thead><tr><th>Attribute · level</th><th class="r">Effect</th><th class="r">Creatives</th><th class="r">Spend</th>
+          <th>Confidence <span class="dim">(act at 0.85)</span></th><th>Status</th><th>What it means</th></tr></thead>
+        <tbody>${findingRows}</tbody>
+      </table>
+    </div>
+    <div class="panel-body" style="border-top:1px solid var(--border)">
+      <div class="note-block">
+        <b>Read the last three rows first.</b> A learning screen that only shows what worked is a marketing document. The
+        confounded row cannot be separated from another attribute in the data it has; the insufficient row is below the
+        10-creative floor at which a per-level estimate is worth acting on; and the no-effect row is a dimension the system
+        has now stopped spending its exploration budget on. Those are findings too, and they are the ones that keep the
+        confident rows honest.
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Angle portfolio</h2>
+      <span class="dim small">hit rate against spend-use ratio — the two axes the bandit needs, kept apart on purpose</span>
+    </div>
+    <div class="panel-body">
+      <div class="quad">
+        <div></div>
+        <div class="axis-x label">Low spend-use ratio (≤ 1.00)</div>
+        <div class="axis-x label">High spend-use ratio (&gt; 1.00)</div>
+
+        <div class="axis-y label">High hit rate<br>(≥ 8%)</div>
+        <div class="cell"><h5>Workhorse</h5>${quadCell('workhorse')}</div>
+        <div class="cell hi"><h5>Safest bet</h5>${quadCell('safest_bet')}</div>
+
+        <div class="axis-y label">Low hit rate<br>(&lt; 8%)</div>
+        <div class="cell lo"><h5>Stop generating</h5>${quadCell('stop_generating')}</div>
+        <div class="cell"><h5>High-variance bet</h5>${quadCell('high_variance_bet')}</div>
+      </div>
+      <div class="note-block" style="margin-top:12px">
+        Low hit rate with a high spend-use ratio is <b>not</b> a loser. It is an angle whose winners are rare and large, and
+        it gets a small fixed slot the bandit is not allowed to starve. Collapsing these two axes into one score is exactly
+        how that distinction disappears — which is why there are two axes and not a ranking.
+      </div>
+      ${insufficient.length ? `<div class="note-block plain" style="margin-top:10px">
+        <b>Unclassified:</b> ${insufficient.map((r) => `${esc(r.statement)} (${r.creativesWithSpend} creatives)`).join('; ')} —
+        under the ${MIN_CREATIVES_FOR_ANGLE_CLASSIFICATION}-creative floor, so the classifier refuses rather than guessing.
+        An estimate here would be an allocation decision made on noise.
+      </div>` : ''}
+    </div>
+    <div class="panel-body tight scroll-x" style="border-top:1px solid var(--border)">
+      <table class="grid">
+        <thead><tr><th>Angle</th><th>Status</th><th class="r">Creatives</th><th class="r">Winners</th>
+          <th class="r">Hit rate</th><th class="r">SUR</th><th>Class</th><th>Variant space</th></tr></thead>
+        <tbody>${angleRows}</tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="panel">
+      <div class="panel-head"><h2>Exploration budget</h2><span class="dim small">where the next creatives are going</span></div>
+      <div class="panel-body">
+        ${[['promotional','Promotional cluster'],['interrupt','Interrupt cluster'],['unclustered','Unclustered tactics']].map(([k, lbl]) => `
+          <div style="margin-bottom:10px">
+            <div style="display:flex;justify-content:space-between;font-size:12.5px">
+              <span>${lbl}</span><span class="mono">${(ex[k] * 100).toFixed(0)}%</span>
+            </div>
+            <div class="meter" style="margin-top:4px">
+              <i class="${k === 'interrupt' && interruptShort ? 'crit' : ''}" style="width:${(ex[k] * 100).toFixed(0)}%"></i>
+              ${k === 'interrupt' ? '<b style="left:20%"></b>' : ''}
+            </div>
+          </div>`).join('')}
+        <div class="${interruptShort ? 'note-block' : 'note-block plain'}">
+          The interrupt cluster has a hard floor of ${Math.round(INTERRUPT_EXPLORATION_FLOOR * 100)}% of exploration.
+          Promotional tactics lead the published leaderboard on both hit rate and spend-use ratio, but the measurement
+          window spanned Black Friday and the report says so itself. A greedy bandit would starve the interrupt cluster on
+          a seasonal artefact, so it is not allowed to.
+          ${interruptShort ? ` <b>Currently ${(ex.interrupt * 100).toFixed(0)}% — below the floor; the next two briefs are forced interrupt.</b>` : ''}
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>What this changes next</h2></div>
+      <div class="panel-body">
+        <ul class="explain small">
+          ${L.findings.filter((f) => f.act === 'acting').map((f) => `<li><span class="mono">${esc(f.dim)}=${esc(f.level)}</span> — ${f.effect < 0 ? 'weighted up' : 'suppressed'} in the next generation window.</li>`).join('')}
+          ${withClass.filter((r) => r.cls === 'stop_generating').map((r) => `<li>Angle <span class="mono">${esc(r.id)}</span> is out of the rotation: ${r.creativesWithSpend} creatives, no winner, and it consumes less budget than its share — the two-axis test says stop.</li>`).join('')}
+          ${withClass.filter((r) => r.coverage >= 0.6 && r.cls !== 'stop_generating').map((r) => `<li>Angle <span class="mono">${esc(r.id)}</span> has tried ${(r.coverage * 100).toFixed(0)}% of its variant cells. At 80% it retires whether or not it is still winning — an angle you have said every way is finished.</li>`).join('')}
+        </ul>
+      </div>
+    </div>
+  </div>`;
+}
+function wireLearning() {
+  $$('#learn-seg button').forEach((btn) => {
+    btn.onclick = () => { LEARN_STATE.brandId = btn.dataset.lb; draw('learning'); };
+  });
+}
+
+/* ------------------------------------------------------------ app */
+const SCREENS = {
+  overview: { render:renderOverview },
+  brands:   { render:renderBrands },
+  funnel:   { render:renderFunnel, wire:wireFunnel },
+  creative: { render:renderCreative, wire:wireCreative },
+  learning: { render:renderLearning, wire:wireLearning },
+};
+let CURRENT = 'overview';
+
+function draw(name) {
+  const s = SCREENS[name];
+  if (!s) return;
+  const el = document.getElementById('screen-' + name);
+  el.innerHTML = s.render();
+  if (s.wire) s.wire();
+}
+function go(name, push) {
+  if (!SCREENS[name]) name = 'overview';
+  CURRENT = name;
+  Object.keys(SCREENS).forEach((k) => { document.getElementById('screen-' + k).hidden = k !== name; });
+  $$('.rail button').forEach((b) => b.setAttribute('aria-current', String(b.dataset.nav === name)));
+  draw(name);
+  if (push !== false) {
+    try { history.replaceState(null, '', '#' + name); } catch (e) { location.hash = name; }
+  }
+  window.scrollTo(0, 0);
+}
+
+/* theme */
+(function theme() {
+  const btn = document.getElementById('theme-btn');
+  const order = ['system','light','dark'];
+  let cur = 'system';
+  try { cur = localStorage.getItem('sc-theme') || 'system'; } catch (e) { cur = 'system'; }
+  function apply() {
+    if (cur === 'system') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.setAttribute('data-theme', cur);
+    btn.textContent = 'Theme: ' + cur;
+    try { localStorage.setItem('sc-theme', cur); } catch (e) { /* private mode */ }
+  }
+  btn.onclick = () => { cur = order[(order.indexOf(cur) + 1) % order.length]; apply(); };
+  apply();
+})();
+
+/* clock */
+(function clock() {
+  const el = document.getElementById('clock');
+  function tick() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    el.textContent = `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`;
+  }
+  tick(); setInterval(tick, 1000);
+})();
+
+$$('.rail button').forEach((b) => { b.onclick = () => go(b.dataset.nav); });
+window.addEventListener('hashchange', () => go((location.hash || '#overview').slice(1), false));
+go((location.hash || '#overview').slice(1), false);
+</script>
+
+</body>
+</html>

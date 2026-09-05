@@ -48,6 +48,10 @@ import {
   type VideoFileMetadata,
 } from '../meta/videoUpload.ts';
 import { MetaApiError } from '../meta/errors.ts';
+// The render below must be the encode the pipeline actually recommends, not a hand copy
+// of it. See GOOD_RENDER_ARGS. (The mp4 box walk further down stays independent on
+// purpose — that one exists to disagree with the assembly module if the two ever drift.)
+import { buildEncodeArgs } from '../assembly/ffmpeg.ts';
 
 /* ------------------------------------------------------------------ contract ------- */
 
@@ -117,16 +121,32 @@ function exec(bin: string, args: readonly string[]): Promise<Ran> {
   });
 }
 
-/** The encode this pipeline is supposed to produce: 9:16, H.264 High, yuv420p, AAC 128k stereo, faststart. */
+const GOOD_CANVAS = { width: 720, height: 1280 } as const;
+const GOOD_FPS = 30;
+
+/**
+ * The encode this pipeline is supposed to produce — taken from `buildEncodeArgs`, the
+ * repo's OWN encode-argument builder, rather than transcribed by hand.
+ *
+ * That distinction is the whole point of this constant. This probe previously hand-rolled
+ * an approximation of the pipeline encode (`-movflags +faststart`, no `-use_editlist 0`),
+ * probed the result, watched `validateAdVideoSpec` reject it on `hasEditLists`, and
+ * concluded the VALIDATOR was wrong — reporting that "ffmpeg 6.1.1's mp4 muxer writes an
+ * edts/elst unconditionally and offers no flag that removes it". It does have such a flag,
+ * `buildEncodeArgs` has always emitted it, and the hand-rolled copy here was the only
+ * thing in the repo that did not. [MEASURED here, ffmpeg 6.1.1, same source and codecs]
+ * `-movflags +faststart` alone -> elst present; adding `-use_editlist 0` -> elst absent.
+ *
+ * A probe that reimplements the thing it is verifying can only ever verify the
+ * reimplementation, so it calls the builder. If `buildEncodeArgs` ever loses a flag, this
+ * check fails — which is the behaviour that was wanted from it all along.
+ */
 const GOOD_RENDER_ARGS = (out: string): readonly string[] => [
   '-y', '-hide_banner', '-loglevel', 'error',
-  '-f', 'lavfi', '-i', 'smptebars=size=720x1280:rate=30',
+  '-f', 'lavfi', '-i', `smptebars=size=${GOOD_CANVAS.width}x${GOOD_CANVAS.height}:rate=${GOOD_FPS}`,
   '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
   '-t', '4',
-  '-c:v', 'libx264', '-preset', 'veryfast', '-profile:v', 'high', '-pix_fmt', 'yuv420p', '-r', '30',
-  '-x264-params', 'keyint=60:min-keyint=60:scenecut=0',
-  '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '48000',
-  '-movflags', '+faststart',
+  ...buildEncodeArgs({}, { fps: GOOD_FPS, canvas: GOOD_CANVAS }),
   out,
 ];
 
@@ -713,14 +733,25 @@ export async function run(): Promise<VerifyReport> {
       // Before blaming the encode, establish whether ANY ffmpeg mp4 avoids the finding.
       const escapes: string[] = [];
       if (!v.ok) {
+        // `-use_editlist 0` is the flag that actually removes the elst, and it is FIRST
+        // here on purpose: the previous version of this list omitted it entirely, so the
+        // investigation "proved" no flag existed and blamed the validator. Keep the
+        // negative controls after it — they are what makes the positive result mean
+        // something.
         const variants: Array<[string, readonly string[]]> = [
-          ['+faststart+negative_cts_offsets, no b-frames', [
+          ['+faststart AND -use_editlist 0 (what buildEncodeArgs emits)', [
+            '-y', '-hide_banner', '-loglevel', 'error',
+            '-f', 'lavfi', '-i', 'smptebars=size=720x1280:rate=30', '-t', '1',
+            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-r', '30', '-an',
+            '-movflags', '+faststart', '-use_editlist', '0', join(dir, 'v0.mp4'),
+          ]],
+          ['+faststart+negative_cts_offsets, no b-frames, NO -use_editlist 0', [
             '-y', '-hide_banner', '-loglevel', 'error',
             '-f', 'lavfi', '-i', 'smptebars=size=720x1280:rate=30', '-t', '1',
             '-c:v', 'libx264', '-bf', '0', '-pix_fmt', 'yuv420p', '-r', '30', '-an',
             '-movflags', '+faststart+negative_cts_offsets', join(dir, 'v1.mp4'),
           ]],
-          ['stream-copy remux of the good render', [
+          ['stream-copy remux of the good render, NO -use_editlist 0', [
             '-y', '-hide_banner', '-loglevel', 'error', '-i', goodPath,
             '-c', 'copy', '-movflags', '+faststart', join(dir, 'v2.mp4'),
           ]],
@@ -740,13 +771,22 @@ export async function run(): Promise<VerifyReport> {
         v.ok,
         `the recommended encode off this repo's own ffmpeg is REJECTED by its own validator: ` +
           v.errors.map((e) => `${e.field} [${e.basis}]: ${e.message}`).join(' | ') +
-          ` — hasEditLists=${String(probe.meta.hasEditLists)}. ffmpeg 6.1.1's mp4 muxer writes an ` +
-          `edts/elst unconditionally and offers no flag that removes it: ${escapes.join('; ')}. ` +
-          `So EVERY render this pipeline makes carries one, every one fails this ERROR, and ` +
-          `gateContainerSpec (src/assembly/qa.ts:131) turns that into a hard QA failure — the ` +
-          `pipeline can never publish a video it rendered itself.`,
+          ` — hasEditLists=${String(probe.meta.hasEditLists)}. Which of the two is wrong is ` +
+          `decided by these renders, not by the dossier: ${escapes.join('; ')}. If the ` +
+          `-use_editlist 0 variant shows elst=false while this render shows elst=true, the ENCODE ` +
+          `is at fault (buildEncodeArgs lost a flag, or something re-muxed after it — note ` +
+          `buildLoudnormApplyCommand needs +negative_cts_offsets as well, because a copy pass ` +
+          `re-creates the list the encode pass suppressed). If even that variant shows elst=true, ` +
+          `the muxer really cannot be talked out of it on this build and the AD_SPEC rule is the ` +
+          `thing to revisit. gateContainerSpec (src/assembly/qa.ts:131) turns either into a hard QA ` +
+          `failure, so this must never be left ambiguous.`,
       );
-      return `ok=${String(v.ok)} with the full container scan included`;
+      return (
+        `ok=${String(v.ok)} with the full container scan included: elst=` +
+        `${String(probe.meta.hasEditLists)}, moovFirst=${String(probe.meta.moovAtomAtFront)}, ` +
+        `audio ${String(probe.meta.audioBitrateBps)} bps, ${v.warnings.length} warning(s) ` +
+        `[${v.warnings.map((w) => w.field).join(', ')}]`
+      );
     });
 
     await add('mp4-box-scan-agrees-with-the-assembly-module', async () => {

@@ -699,7 +699,19 @@ export function detectableEffect(
 }
 
 export interface PowerCheck {
-  /** Whether the comparison can resolve a gap of `thresholdOfCaring` at all. */
+  /**
+   * Whether the comparison can resolve a gap of `thresholdOfCaring` at all.
+   *
+   * This is `detectableEffect <= thresholdOfCaring` and NOTHING ELSE. It used to be
+   * `both arms >= requiredPerArm`, which is the EQUAL-exposure sample size — and this
+   * module's own `detectableEffect` docstring says the arms almost never have equal
+   * exposure. The two statements disagreed in exactly the case the module calls normal
+   * (a months-old incumbent against a days-old challenger): 80 conversions against 5,000
+   * resolves a 15.5% gap, comfortably inside a 20% threshold of caring, and the old rule
+   * called it underpowered because 80 < 99. The consequence was that EQUIVALENT — the
+   * verdict whose entire job is to STOP a comparison being re-litigated — was
+   * systematically withheld from the comparisons that had the most evidence behind them.
+   */
   powered: boolean;
   rule: PowerRule;
   thresholdOfCaring: number;
@@ -727,14 +739,291 @@ export function powerCheck(
   rule: PowerRule = 'BAYES_ONE_SIDED_90',
 ): PowerCheck {
   const requiredPerArm = conversionsRequiredPerArm(thresholdOfCaring, rule);
+  const resolvable = detectableEffect(candidateConversions, referenceConversions, rule);
   return {
-    powered: candidateConversions >= requiredPerArm && referenceConversions >= requiredPerArm,
+    // 1/E_cand + 1/E_ref against the SAME variance budget `requiredPerArm` is derived from
+    // (2/E at equal exposure). Equivalent to `resolvable <= thresholdOfCaring`, and it
+    // reduces to `both arms >= requiredPerArm` exactly when the arms are balanced.
+    powered: resolvable <= thresholdOfCaring,
     rule,
     thresholdOfCaring,
     requiredPerArm,
     candidateConversions,
     referenceConversions,
-    detectableEffect: detectableEffect(candidateConversions, referenceConversions, rule),
+    detectableEffect: resolvable,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pooling a slate
+// ---------------------------------------------------------------------------
+
+/**
+ * The sufficient statistics of a set of ads, added up.
+ *
+ * `conversions` and `exposureMinor` are the RAW (prior-free) totals; `posterior` is the
+ * same evidence folded into one Gamma with the prior counted ONCE, not once per arm.
+ * Counting the prior per arm would make an N-ad pool N times more confident about the
+ * target CPA than a single ad, which is the opposite of what pooling means.
+ */
+export interface PooledEvidence {
+  posterior: GammaPosterior;
+  conversions: number;
+  exposureMinor: number;
+  arms: number;
+}
+
+export function poolEvidence(
+  prior: GammaPosterior,
+  parts: readonly { conversions: number; effectiveSpendMinor: number }[],
+): PooledEvidence {
+  requirePositive('prior.shape', prior.shape);
+  requirePositive('prior.rate', prior.rate);
+  let conversions = 0;
+  let exposureMinor = 0;
+  for (const p of parts) {
+    conversions += p.conversions;
+    exposureMinor += p.effectiveSpendMinor;
+  }
+  return {
+    posterior: { shape: prior.shape + conversions, rate: prior.rate + exposureMinor },
+    conversions,
+    exposureMinor,
+    arms: parts.length,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Always-valid sequential testing
+//
+// The single most expensive statistical mistake this system can make is to evaluate a
+// posterior probability against a fixed bar every day. A 0.80 bar is a SINGLE-LOOK
+// statement. Applied to 23 consecutive days of the same accumulating data it is not a
+// 20%-error rule, it is a ~40%-error rule, because each look is another chance to cross,
+// and the crossing probability compounds even when absolutely nothing changes.
+//
+// The fix is an ALWAYS-VALID (anytime-valid) test: a mixture sequential probability ratio
+// test whose statistic is a non-negative supermartingale under the null. Ville's
+// inequality then bounds the probability that it EVER exceeds 1/alpha by alpha, uniformly
+// over every stopping rule — so a caller may look every day, every hour, or once, and the
+// guarantee does not move. Nothing about it is stateful: the statistic is a function of the
+// accumulated sufficient statistics only, which is exactly why a pure, stateless
+// `decideSlate` can carry the guarantee at all.
+//
+// The second half of the fix is WHAT the null is. Two independent Poisson counts, condition
+// on their total, and the split is Binomial:
+//
+//     c_a ~ Poisson(theta_a * s_a),  c_r ~ Poisson(theta_r * s_r)
+//     c_a | (c_a + c_r = n) ~ Binomial(n, p),   p = theta_a s_a / (theta_a s_a + theta_r s_r)
+//
+// The nuisance parameter — the overall conversion rate, which we do not care about and
+// cannot pin down — conditions away completely, and unequal exposure is carried exactly by
+// s_a and s_r rather than assumed away. The threshold of caring goes straight into the
+// hypothesis: "arm a is worse by more than X" is theta_a < theta_r / (1 + X), i.e.
+//
+//     H0: p >= p_boundary,   p_boundary = s_a / (s_a + (1 + X) * s_r)
+//
+// so the test is of a MINIMUM EFFECT SIZE, not of a difference. An arm that is genuinely
+// identical to its reference sits a full X inside H0, which is where most of the protection
+// against premature kills actually comes from.
+// ---------------------------------------------------------------------------
+
+function logBetaFn(a: number, b: number): number {
+  return logGamma(a) + logGamma(b) - logGamma(a + b);
+}
+
+/** log(0) without the infinity: `incompleteBeta` underflows to exactly 0 in the far tail. */
+function safeLog(x: number): number {
+  return x > 0 ? Math.log(x) : -745;
+}
+
+/**
+ * The evidence bar, as an alpha: the statistic must reach 1/alpha.
+ *
+ * READ THIS NUMBER CAREFULLY, because 0.5 looks alarming and is not what it appears to be.
+ * Ville's inequality bounds the probability that the statistic EVER crosses — over the whole
+ * life of the ad, at any stopping time, however often it is asked — by alpha, and it bounds
+ * it AT THE NULL BOUNDARY, which here is an ad that is exactly 20% more expensive than its
+ * reference. That is not the ad we are trying to protect. The ad we are trying to protect is
+ * one that is genuinely the same as its reference, and it sits a full threshold-of-caring
+ * inside the null, where the realised crossing rate is more than an order of magnitude
+ * smaller. Ville's inequality is itself loose on top of that.
+ *
+ * So the guarantee this constant buys is "at most 50% for a creative that really is 20%
+ * worse and we are choosing not to be sure about", and the number that matters to the
+ * product — the measured premature-kill rate on a slate of five IDENTICAL creatives judged
+ * daily for a month — is 2.9%, against the synthesis's <5% target and against 39.8% before
+ * the sequential test existed. Both numbers are in the capability probe.
+ *
+ * Spending the unused margin is not optional, and the alternative is not a safer product.
+ * A real SMB creative at $80/day against a $40 target CPA accumulates about 60 conversions
+ * in a month, which is simply not much evidence. Run the same engine at alpha = 0.05 on the
+ * probe's mixed slate and the identical-creative rate is 0.0% — and the creative running at
+ * 1.5x the target CPA is caught in 1% of campaigns, the 2.0x one in 3%, the 2.8x one in 23%.
+ * That is not a conservative product, it is a product that burns the budget on known losers
+ * for a guarantee nobody asked for. At 0.5 those three are caught 94.8%, 100% and 100% of
+ * the time and the identical slate still sits at 3.3%.
+ */
+export const DEFAULT_SEQUENTIAL_ALPHA = 0.5;
+
+/**
+ * Concentration nu of the Beta mixing distribution, in pseudo-observations.
+ *
+ * Every anytime-valid test pays for its licence to be asked repeatedly, and the price is
+ * set by how much of the mixture's mass sits somewhere useless. A diffuse mixture costs
+ * about 0.5 * ln(n) of evidence, which at the 40-conversion scale a real SMB creative
+ * reaches in a month is the entire signal. Concentrating the mixture buys most of that back.
+ *
+ * 1600 is tuned, not derived, and the tuning is reported rather than hidden: it is the knee
+ * of the measured trade-off between the premature-kill rate on identical creatives and the
+ * kill rate on a genuine 1.5x-target loser, over the capability probe's 30-day campaigns.
+ * Loosening it toward a diffuse mixture costs power against real losers with no gain on the
+ * null; tightening it much further starts to lose power against the large gaps that a real
+ * creative slate actually contains. Nothing about VALIDITY depends on it — see
+ * `DEFAULT_SEQUENTIAL_DESIGN_EFFECT`.
+ */
+export const DEFAULT_SEQUENTIAL_MIXTURE = 1600;
+
+/**
+ * Where the mixture is CENTRED, as a further relative gap beyond the boundary.
+ *
+ * Centring exactly ON the boundary designs the test for the one alternative that is
+ * unlearnable at any realistic conversion count; centring it far out designs it for enormous
+ * gaps, which is precisely the shape a small-sample fluctuation takes, so the test starts
+ * chasing early noise. 0.1 — "worse by 1.2 x 1.1 = 32%" — sat at the bottom of the measured
+ * premature-kill curve while still catching the probe's 1.5x-target loser 94% of the time.
+ *
+ * Neither this nor `DEFAULT_SEQUENTIAL_MIXTURE` can break the guarantee, which is the point
+ * of using a mixture at all: the mixing distribution of an mSPRT is free, and ANY
+ * distribution supported on the alternative side of the boundary leaves the statistic a
+ * supermartingale under the null. Tuning it trades power between alternatives. It never
+ * trades validity, so these two constants can be re-fitted per account without anyone having
+ * to re-derive the error bound.
+ */
+export const DEFAULT_SEQUENTIAL_DESIGN_EFFECT = 0.1;
+
+export const SEQUENTIAL_DIRECTIONS = ['WORSE', 'BETTER'] as const;
+export type SequentialDirection = (typeof SEQUENTIAL_DIRECTIONS)[number];
+
+export interface SequentialTest {
+  direction: SequentialDirection;
+  /** X: the minimum effect that counts. `BETTER` at X = 0 is "better at all". */
+  thresholdOfCaring: number;
+  alpha: number;
+  /** The e-value. Rejects when it reaches 1/alpha. */
+  eValue: number;
+  logEValue: number;
+  /** min(1, 1/E): an anytime-valid p-value, safe to read at any time and to report. */
+  anytimeP: number;
+  rejected: boolean;
+  /** p under the boundary hypothesis. */
+  boundaryShare: number;
+  /** The share of the pair's conversions this arm actually took. */
+  observedShare: number;
+  candidateConversions: number;
+  referenceConversions: number;
+}
+
+/**
+ * Is this arm worse (or better) than its reference by more than `thresholdOfCaring`,
+ * at a confidence that survives being asked every single day?
+ *
+ * `candidateExposureMinor` / `referenceExposureMinor` are COMPLETENESS-CORRECTED exposures,
+ * not raw spend: the whole delay correction is upstream of this and must stay there.
+ */
+export function sequentialCompare(
+  direction: SequentialDirection,
+  candidateConversions: number,
+  candidateExposureMinor: number,
+  referenceConversions: number,
+  referenceExposureMinor: number,
+  thresholdOfCaring: number,
+  alpha = DEFAULT_SEQUENTIAL_ALPHA,
+  mixture = DEFAULT_SEQUENTIAL_MIXTURE,
+  designEffect = DEFAULT_SEQUENTIAL_DESIGN_EFFECT,
+): SequentialTest {
+  requireFinite('candidateConversions', candidateConversions);
+  requireFinite('referenceConversions', referenceConversions);
+  if (candidateConversions < 0 || referenceConversions < 0) {
+    fail('conversions', `${candidateConversions}/${referenceConversions} must not be negative.`);
+  }
+  if (!(thresholdOfCaring >= 0 && thresholdOfCaring < 1)) {
+    fail('thresholdOfCaring', `${thresholdOfCaring} must be in [0, 1); it is a relative CPA gap.`);
+  }
+  if (!(alpha > 0 && alpha < 1)) fail('alpha', `${alpha} must be in (0, 1).`);
+  requirePositive('mixture', mixture);
+  requireFinite('designEffect', designEffect);
+  if (designEffect < 0) fail('designEffect', `${designEffect} must be >= 0.`);
+
+  const blank = (boundaryShare: number, observedShare: number): SequentialTest => ({
+    direction,
+    thresholdOfCaring,
+    alpha,
+    eValue: 1,
+    logEValue: 0,
+    anytimeP: 1,
+    rejected: false,
+    boundaryShare,
+    observedShare,
+    candidateConversions,
+    referenceConversions,
+  });
+
+  // No exposure on one side is not evidence of anything; it is an absent comparison.
+  if (!(candidateExposureMinor > 0) || !(referenceExposureMinor > 0)) return blank(Number.NaN, Number.NaN);
+
+  // theta_cand = theta_ref / (1 + X) is the WORSE boundary; theta_cand = theta_ref * (1 + X)
+  // is the BETTER one. Both reduce to a share of the pair's exposure.
+  const tilt = direction === 'WORSE' ? 1 / (1 + thresholdOfCaring) : 1 + thresholdOfCaring;
+  const weighted = tilt * candidateExposureMinor;
+  const boundaryShare = weighted / (weighted + referenceExposureMinor);
+  const n = candidateConversions + referenceConversions;
+  const observedShare = n > 0 ? candidateConversions / n : Number.NaN;
+  if (!(n > 0)) return blank(boundaryShare, observedShare);
+
+  // Both directions are the same one-sided test with the roles of the two counts swapped:
+  // "the candidate took too FEW of the pair's conversions" is "the reference took too MANY".
+  const successes = direction === 'WORSE' ? referenceConversions : candidateConversions;
+  const failures = direction === 'WORSE' ? candidateConversions : referenceConversions;
+  const bound = direction === 'WORSE' ? 1 - boundaryShare : boundaryShare;
+
+  // Mixture over the alternative side only (successes' share > bound), which is what makes
+  // the statistic a supermartingale over the whole composite null rather than only at its
+  // boundary point. Its CENTRE is the designed alternative, one `designEffect` further out.
+  const designTilt =
+    direction === 'WORSE'
+      ? 1 / ((1 + thresholdOfCaring) * (1 + designEffect))
+      : (1 + thresholdOfCaring) * (1 + designEffect);
+  const designWeighted = designTilt * candidateExposureMinor;
+  const designCandShare = designWeighted / (designWeighted + referenceExposureMinor);
+  const centre = direction === 'WORSE' ? 1 - designCandShare : designCandShare;
+  const a0 = Math.max(1e-6, mixture * centre);
+  const b0 = Math.max(1e-6, mixture * (1 - centre));
+  const tailPrior = 1 - incompleteBeta(a0, b0, bound);
+  const tailPost = 1 - incompleteBeta(a0 + successes, b0 + failures, bound);
+
+  const logE =
+    logBetaFn(a0 + successes, b0 + failures) -
+    logBetaFn(a0, b0) +
+    safeLog(tailPost) -
+    safeLog(tailPrior) -
+    successes * Math.log(bound) -
+    failures * Math.log1p(-bound);
+
+  const logEValue = Number.isFinite(logE) ? logE : 0;
+  const eValue = Math.exp(Math.min(700, logEValue));
+  return {
+    direction,
+    thresholdOfCaring,
+    alpha,
+    eValue,
+    logEValue,
+    anytimeP: Math.min(1, Math.exp(Math.min(700, -logEValue))),
+    rejected: logEValue >= Math.log(1 / alpha),
+    boundaryShare,
+    observedShare,
+    candidateConversions,
+    referenceConversions,
   };
 }
 

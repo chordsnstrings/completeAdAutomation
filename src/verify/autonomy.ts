@@ -295,12 +295,17 @@ function simulateCampaign(specs: readonly CreativeSpec[], seed: number, opts: Ru
       if (d.verdict === 'KILL' && alive.get(d.adId) === true) {
         alive.set(d.adId, false);
         killedOnDay.set(d.adId, decisionDay);
-        const ref = slate.decisions.find((x) => x.adId === d.comparedToAdId);
+        // The reference is the POOLED rest of the slate, so add its arms up rather than
+        // looking for a single ad; `comparedToAdId` only exists on a two-ad slate.
+        const referenceConversions = d.referenceAdIds.reduce(
+          (acc, id) => acc + (slate.decisions.find((x) => x.adId === id)?.fit.conversions ?? 0),
+          0,
+        );
         kills.push({
           adId: d.adId,
           day: decisionDay,
           conversions: d.fit.conversions,
-          referenceConversions: ref?.fit.conversions ?? -1,
+          referenceConversions,
           pWorseByThreshold: d.comparison?.pWorseByThreshold ?? -1,
           powered: d.power?.powered ?? false,
           slateSize: live.length,
@@ -847,39 +852,75 @@ export async function run(): Promise<VerifyReport> {
   // --- 14. Power: EQUIVALENT is refused below the floor -------------------
   checks.push(
     guard('power/refuses to declare equivalence below the statistical floor', () => {
-      // Reference: 5000 conversions. Candidate: 80 (below the ~99 floor) then 120 (above it).
-      // Spends are chosen so both posteriors have the same mean CPA — so the ROPE genuinely
-      // fills up and only the power gate can stop an EQUIVALENT verdict.
+      // Reference: 5000 conversions. Candidates of increasing size at the SAME mean CPA, so
+      // the ROPE genuinely fills up and only the floor can stop an EQUIVALENT verdict.
+      //
+      // THE FLOOR CHANGED, and this check changed with it. It used to be "both arms at or
+      // above the EQUAL-exposure sample size of ~99 conversions", which is what check 15
+      // below shows to be inconsistent with this module's own detectableEffect(): 80
+      // conversions against a 5,000-conversion reference resolve a 15.5% gap, comfortably
+      // inside a 20% threshold of caring, and refusing to call that powered withheld
+      // EQUIVALENT from exactly the comparisons carrying the most evidence. The floor is now
+      // "this pair can resolve the threshold of caring at THEIR exposures", and the case that
+      // used to be the fixture for the trap — 80 vs 5,000 — is now a case the module is
+      // supposed to retire. It is asserted below, in that direction, on purpose.
       const reference = settledAd({ id: 'ref', conversions: 5000, spendMinor: 20_000_000 });
-      const thin = settledAd({ id: 'thin', conversions: 80, spendMinor: 320_000 });
-      const thick = settledAd({ id: 'thick', conversions: 120, spendMinor: 480_000 });
+      const cand = (n: number): AdEvidence =>
+        settledAd({ id: 'cand', conversions: n, spendMinor: 4000 * n });
+      const look = (n: number): AdDecision => decisionFor(decide([reference, cand(n)]), 'cand');
 
-      const thinD = decisionFor(decide([reference, thin]), 'thin');
-      const thickD = decisionFor(decide([reference, thick]), 'thick');
-
-      const thinRope = thinD.comparison?.ropeMass ?? 0;
-      const thickRope = thickD.comparison?.ropeMass ?? 0;
-      const required = thinD.power?.requiredPerArm ?? 0;
-
-      if (!(thinRope >= DEFAULT_THRESHOLDS.equivalentAt)) {
-        return skipped(
-          `could not construct the trap: the thin arm's ROPE mass is only ${thinRope.toFixed(3)}, ` +
-            `below the ${DEFAULT_THRESHOLDS.equivalentAt} equivalence bar, so the power gate is not ` +
-            `the thing being tested here.`,
-          'fixture could not reach the equivalence branch',
+      const rows: string[] = [];
+      const wrong: string[] = [];
+      for (const n of [8, 20, 40, 60, 80, 120, 400]) {
+        const d = look(n);
+        const rope = d.comparison?.ropeMass ?? 0;
+        const resolvable = d.power?.detectableEffect ?? Number.POSITIVE_INFINITY;
+        rows.push(
+          `${n}: resolves ${resolvable.toFixed(3)}, powered=${d.power?.powered}, ` +
+            `ROPE ${rope.toFixed(3)} → ${d.verdict}`,
         );
+        // THE INVARIANT: a comparison is only ever retired when it can actually resolve the
+        // gap we care about AND the posterior really is concentrated inside it.
+        if (d.verdict === 'EQUIVALENT') {
+          if (d.power?.powered !== true) wrong.push(`${n} conversions: EQUIVALENT while unpowered`);
+          if (resolvable > DEFAULT_THRESHOLDS.thresholdOfCaring) {
+            wrong.push(`${n} conversions: EQUIVALENT while only able to resolve ${resolvable.toFixed(3)}`);
+          }
+          if (rope < DEFAULT_THRESHOLDS.equivalentAt) {
+            wrong.push(`${n} conversions: EQUIVALENT on ROPE mass ${rope.toFixed(3)}`);
+          }
+        }
+        // And the converse direction of the same invariant: powered() must never be a
+        // reference-size test in disguise.
+        if (d.power !== undefined && d.power.powered !== resolvable <= DEFAULT_THRESHOLDS.thresholdOfCaring) {
+          wrong.push(`${n} conversions: powered=${d.power.powered} disagrees with detectableEffect`);
+        }
       }
-      const thinOk = thinD.power?.powered === false && thinD.verdict === 'HOLD';
-      const thickOk = thickD.power?.powered === true && thickD.verdict === 'EQUIVALENT';
+
+      const thin = look(40);
+      const thick = look(120);
+      const unequal = look(80);
+      const required = thin.power?.requiredPerArm ?? 0;
+      const thinOk = thin.power?.powered === false && thin.verdict !== 'EQUIVALENT';
+      const thickOk = thick.power?.powered === true && thick.verdict === 'EQUIVALENT';
+      // The regression this check now guards in the OTHER direction: a small arm against a
+      // huge one is the module's own stated normal case, and it must not be blocked by an
+      // equal-exposure floor it does not have to meet.
+      const unequalOk = unequal.verdict === 'EQUIVALENT' && unequal.power !== undefined && unequal.power.candidateConversions < required;
+
       const detail =
-        `80 conversions vs 5000: ROPE mass ${thinRope.toFixed(3)} ≥ ${DEFAULT_THRESHOLDS.equivalentAt} ` +
-        `(the equivalence bar is MET) but powered = ${thinD.power?.powered} against ` +
-        `${required.toFixed(0)} required per arm → verdict ${thinD.verdict}. ` +
-        `120 conversions vs 5000: ROPE ${thickRope.toFixed(3)}, powered = ${thickD.power?.powered} ` +
-        `→ verdict ${thickD.verdict}.`;
-      return thinOk && thickOk
-        ? pass(`the module refuses to retire a comparison it never actually made. ${detail}`)
-        : bad(`the power gate did not behave as documented. ${detail}`);
+        `reference 5000 conversions, candidate swept at the same CPA — ${rows.join('; ')}. ` +
+        `The equal-exposure figure is ${required.toFixed(0)}/arm; the candidate at 80 clears ` +
+        `equivalence with ${unequal.power?.candidateConversions} because its reference carries the ` +
+        `rest of the information (${unequal.power?.detectableEffect.toFixed(3)} resolvable).`;
+      if (wrong.length > 0) return bad(`the equivalence floor was violated: ${wrong.join(' | ')}. ${detail}`);
+      return thinOk && thickOk && unequalOk
+        ? pass(`the module refuses to retire a comparison it never actually made, and stops ` +
+            `refusing once the pair can genuinely resolve the gap. ${detail}`)
+        : bad(
+            `the floor did not behave as documented (40 held: ${thinOk}, 120 retired: ${thickOk}, ` +
+              `80-vs-5000 no longer blocked by the equal-exposure floor: ${unequalOk}). ${detail}`,
+          );
     }),
   );
 

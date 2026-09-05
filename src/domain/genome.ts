@@ -418,6 +418,66 @@ const PERSONLESS_ASSET_TYPES: ReadonlySet<AssetType> = new Set<AssetType>([
   'text_only', 'product_image', 'product_image_with_text', 'illustration', 'animation',
 ]);
 
+/**
+ * The medium each asset type IS — §4.5's `medium: video|static|carousel|gif` field, which
+ * this vector deliberately does not store.
+ *
+ * It is not stored because it is a FUNCTION of `assetType` for most of the 15 values, and
+ * two stored sources of truth for the same fact drift (the same reason `funnelStageFor`
+ * is derived). But leaving it underived was the bug: every "this attribute only exists
+ * over time" rule keyed off `durationBucket === 'static'` alone, so a `product_image`
+ * held for 30 seconds escaped all of them and could be tagged with rapid cuts and a
+ * soundtrack. Medium is the axis those rules are actually about; duration was a proxy for
+ * it that only covers one of its values.
+ *
+ *  - `still`         a single frame. No cuts, no audio track, no captions that unfold.
+ *  - `motion`        always a moving image with a soundtrack available.
+ *  - `silent_motion` moves, but the container carries no audio track (a GIF).
+ *  - `multi_card`    a container whose cards may individually be either (§4.5 `carousel`).
+ *  - `either`        genuinely ambiguous: the same production tier ships as a static or a
+ *                    video. Claiming these would be a false refusal, which this module
+ *                    treats as the more expensive error, so no medium rule applies to them.
+ *
+ * This is a total record rather than a set of exceptions ON PURPOSE: appending a 16th
+ * asset type then fails the typecheck until someone decides its medium, instead of
+ * silently defaulting into the unguarded bucket that produced this defect.
+ */
+export type AssetMedium = 'still' | 'motion' | 'silent_motion' | 'multi_card' | 'either';
+
+const ASSET_MEDIUM: Readonly<Record<AssetType, AssetMedium>> = {
+  // "Text only" covers both a text card and a text-forward video (§5.4 groups it with UGC
+  // as the stage-1 discovery tier, which is generated both ways), so it stays ambiguous.
+  text_only: 'either',
+  product_image_with_text: 'still',
+  lifestyle_product_image: 'still',
+  ugc: 'either',
+  high_production: 'either',
+  // A GIF is a moving image with no audio track. Meta transcodes it to a silent video.
+  gif: 'silent_motion',
+  // §5.4 lists Illustration and Animation as separate asset types, so an illustration
+  // that moves is the latter and this one is a still.
+  illustration: 'still',
+  ugc_mashup: 'either',
+  lifestyle_product_image_with_text: 'still',
+  lifestyle_image_with_text: 'still',
+  lifestyle_image: 'still',
+  // §5.7's own note: "screenshots + light motion". Static-to-Video Hybrid is a published
+  // visual_format (§5.5), so a hybrid can legitimately be either.
+  hybrid: 'either',
+  product_image: 'still',
+  animation: 'motion',
+  carousel: 'multi_card',
+};
+
+/** The medium an asset type implies. Derived, never stored — see ASSET_MEDIUM. */
+export function mediumForAssetType(assetType: AssetType): AssetMedium {
+  const medium = ASSET_MEDIUM[assetType];
+  if (medium === undefined) {
+    throw new GenomeError('assetType', `"${String(assetType)}" has no medium; valid asset types are ${ASSET_TYPES.join(', ')}.`);
+  }
+  return medium;
+}
+
 const SPOKESPERSON_TABLE = [
   ['none', 'non'],
   ['customer', 'cus'],
@@ -480,6 +540,17 @@ export const CAPTION_STYLES: readonly CaptionStyle[] = CAPTION_STYLE.values;
 /** Caption styles that only exist in motion — meaningless on a static. */
 const MOTION_ONLY_CAPTION_STYLES: ReadonlySet<CaptionStyle> = new Set<CaptionStyle>([
   'platform_auto', 'burned_in_word_by_word', 'burned_in_karaoke',
+]);
+
+/**
+ * Caption styles that need an audio track to exist.
+ *
+ * Platform auto-captions are transcribed by Meta from the video's own speech, so on an
+ * asset with no audio track there is nothing to transcribe. Burned-in styles are rendered
+ * by us and need no audio, which is why they are not here.
+ */
+const AUDIO_DEPENDENT_CAPTION_STYLES: ReadonlySet<CaptionStyle> = new Set<CaptionStyle>([
+  'platform_auto',
 ]);
 
 const ASPECT_RATIO_TABLE = [
@@ -656,6 +727,16 @@ const CTA_TABLE = [
 export type GenomeCta = (typeof CTA_TABLE)[number][0];
 const CTA = buildCodec('cta', CTA_TABLE);
 export const GENOME_CTAS: readonly GenomeCta[] = CTA.values;
+
+/**
+ * CTAs whose button text asserts an offer exists.
+ *
+ * The button is Meta's own copy, not ours, so "Get offer" over `offerType: none` is a
+ * claim the landing page cannot honour — the same offer/landing-page drift as an
+ * offer-only hook with nothing to announce, and the same policy exposure. Deliberately
+ * only GET_OFFER: SHOP_NOW, BUY_NOW and ADD_TO_CART assert a purchase path, not a deal.
+ */
+const OFFER_BEARING_CTAS: ReadonlySet<GenomeCta> = new Set<GenomeCta>(['GET_OFFER']);
 
 // ---------------------------------------------------------------------------
 // The vector
@@ -1377,16 +1458,60 @@ export function validateGenome(g: CreativeGenome): ValidationResult {
     ));
   }
 
-  // --- static / motion coherence -------------------------------------------
-  if (g.durationBucket === 'static') {
+  // --- medium coherence -----------------------------------------------------
+  // Two attributes of the vector answer "is this a moving image with sound": `assetType`
+  // (via ASSET_MEDIUM) and `durationBucket`. Where they disagree the asset type wins,
+  // because it names the artefact and duration is only a bucket over it.
+  const medium = mediumForAssetType(g.assetType);
+  const inherentlyMoving = medium === 'motion' || medium === 'silent_motion';
+  const stillFrame = !inherentlyMoving && (medium === 'still' || g.durationBucket === 'static');
+  const hasAudioTrack = !stillFrame && medium !== 'silent_motion';
+
+  if (inherentlyMoving && g.durationBucket === 'static') {
+    errors.push(issue(
+      'motion_asset_with_static_duration',
+      'durationBucket',
+      `assetType "${g.assetType}" is a moving image; durationBucket "static" says it has no duration. ` +
+        'One of the two is wrong, and either way the row would be filed under a medium it does not have.',
+    ));
+  }
+
+  if (stillFrame) {
+    // Name whichever field established that this is a single frame; an operator reading
+    // the message at 3am should not have to work out which of the two rules fired.
+    const because = medium === 'still'
+      ? `assetType "${g.assetType}" is a single frame`
+      : `durationBucket "static" is a single frame`;
     if (g.pacing !== 'static') {
-      errors.push(issue('static_with_pacing', 'pacing', `durationBucket "static" is a still frame; pacing "${g.pacing}" describes cuts that cannot exist.`));
+      errors.push(issue('static_with_pacing', 'pacing', `${because}; pacing "${g.pacing}" describes cuts that cannot exist. Left uncaught, the regression credits this ad's result to a cut rate that was never on screen.`));
     }
     if (g.musicPresence !== 'none') {
-      errors.push(issue('static_with_music', 'musicPresence', `durationBucket "static" is a still frame; musicPresence "${g.musicPresence}" cannot play.`));
+      errors.push(issue('static_with_music', 'musicPresence', `${because}; musicPresence "${g.musicPresence}" cannot play.`));
     }
     if (MOTION_ONLY_CAPTION_STYLES.has(g.captionStyle)) {
-      errors.push(issue('static_with_motion_captions', 'captionStyle', `captionStyle "${g.captionStyle}" only exists over time; a static can carry "none" or "burned_in_static".`));
+      errors.push(issue('static_with_motion_captions', 'captionStyle', `${because}; captionStyle "${g.captionStyle}" only exists over time. A still can carry "none" or "burned_in_static".`));
+    }
+  }
+
+  // Note what is NOT asserted here: a still asset with a non-static durationBucket. §5.7
+  // pairs offer_led's `product_image_with_text` default with durationBuckets
+  // ["static","s3_8"], i.e. the corpus itself endorses holding a still on screen for a
+  // few seconds. Only the attributes that describe CHANGE over that time are impossible.
+  if (!hasAudioTrack && !stillFrame) {
+    if (g.musicPresence !== 'none') {
+      errors.push(issue(
+        'silent_asset_with_music',
+        'musicPresence',
+        `assetType "${g.assetType}" carries no audio track (Meta transcodes it to a silent video); musicPresence "${g.musicPresence}" cannot play. ` +
+          'A moving asset that genuinely has a soundtrack is "animation" or one of the video tiers.',
+      ));
+    }
+    if (AUDIO_DEPENDENT_CAPTION_STYLES.has(g.captionStyle)) {
+      errors.push(issue(
+        'silent_asset_with_platform_captions',
+        'captionStyle',
+        `captionStyle "${g.captionStyle}" is transcribed by Meta from the asset's own speech, and assetType "${g.assetType}" has no audio track to transcribe. Burn the captions in instead.`,
+      ));
     }
   }
 
@@ -1412,6 +1537,15 @@ export function validateGenome(g: CreativeGenome): ValidationResult {
       'offer_tactic_without_offer',
       'hookTactic',
       `hookTactic "${g.hookTactic}" IS the offer; with offerType "none" the ad would announce something that does not exist. Offer/landing-page drift is a common cause of a policy strike.`,
+    ));
+  }
+
+  if (g.offerType === 'none' && OFFER_BEARING_CTAS.has(g.cta)) {
+    errors.push(issue(
+      'offer_cta_without_offer',
+      'cta',
+      `cta "${g.cta}" is Meta's own button copy asserting that an offer exists; with offerType "none" the landing page cannot honour it. ` +
+        'Same offer/landing-page drift as an offer-only hook with nothing to announce, and the regression would credit the result to an offer that was never made.',
     ));
   }
 
