@@ -255,16 +255,50 @@ export function parseSupportCodes(message: string): readonly string[] {
     .filter((s) => s.length > 0);
 }
 
+/**
+ * How restrictive each route is. A refusal that names several codes must be routed by
+ * the WORST of them, never by whichever happened to be printed first.
+ */
+const ROUTE_SEVERITY: Readonly<Record<SafetyRoute, number>> = {
+  RETRY: 0,
+  AUTO_REWRITE: 1,
+  HUMAN_REVIEW: 2,
+  ABORT: 3,
+};
+
+/**
+ * Veo prints a LIST of support codes ("Support codes: 29310472, 35561574"), and the
+ * categories do not share a route. Selecting the first match in message order is a real
+ * hazard: a celebrity code (AUTO_REWRITE) printed ahead of a third-party-content code
+ * (HUMAN_REVIEW) would send a brand/logo/IP refusal down the auto-rewrite path, and
+ * auto-retrying past that guardrail with a weakened prompt is carve-out (2) of Google's
+ * indemnity — it voids coverage for the output. So the most restrictive route across all
+ * codes wins, and an unrecognised code counts as HUMAN_REVIEW rather than as nothing.
+ */
 export function classifySupportCodes(codes: readonly string[]): {
   category: string;
   route: SafetyRoute;
 } {
-  for (const code of codes) {
-    for (const entry of SUPPORT_CODE_CATEGORIES) {
-      if (entry.codes.includes(code)) return { category: entry.category, route: entry.route };
+  let best: { category: string; route: SafetyRoute } | undefined;
+  const consider = (candidate: { category: string; route: SafetyRoute }): void => {
+    if (best === undefined || ROUTE_SEVERITY[candidate.route] > ROUTE_SEVERITY[best.route]) {
+      best = candidate;
     }
+  };
+
+  for (const code of codes) {
+    let matched = false;
+    for (const entry of SUPPORT_CODE_CATEGORIES) {
+      if (!entry.codes.includes(code)) continue;
+      matched = true;
+      consider({ category: entry.category, route: entry.route });
+    }
+    // An unknown code is not evidence of safety — it must never let a recognised
+    // AUTO_REWRITE code decide the route for the whole refusal.
+    if (!matched) consider({ category: 'UNKNOWN', route: 'HUMAN_REVIEW' });
   }
-  return { category: 'UNKNOWN', route: 'HUMAN_REVIEW' };
+
+  return best ?? { category: 'UNKNOWN', route: 'HUMAN_REVIEW' };
 }
 
 const OPERATION_NAME =
@@ -448,8 +482,16 @@ export class VeoProvider implements VideoProvider {
   /**
    * `taskId` is the full Vertex operation name; the model id is embedded in it, which
    * is what lets a single-argument poll work across models.
+   *
+   * `expectedSamples` is the `sampleCount` the job was submitted with — pass
+   * `SubmitResult.estimate.samples`. It is optional only because the operation name is
+   * enough to poll; supplying it is what makes the DOMINANT Veo failure detectable.
+   * Vertex reports a partially-blocked batch as `done: true` with fewer videos and no
+   * error, and `raiMediaFilteredCount` is documented as "returns IF any videos were
+   * filtered" — i.e. it can be absent. Without the requested count there is then nothing
+   * in the payload distinguishing 1-of-4 from a clean success.
    */
-  async poll(taskId: string): Promise<TaskStatus> {
+  async poll(taskId: string, expectedSamples?: number): Promise<TaskStatus> {
     const parts = OPERATION_NAME.exec(taskId);
     if (!parts) {
       throw new CapabilityError(
@@ -537,16 +579,33 @@ export class VeoProvider implements VideoProvider {
       });
     }
 
-    const filteredCount =
+    const reportedFiltered =
       typeof response['raiMediaFilteredCount'] === 'number' ? response['raiMediaFilteredCount'] : 0;
-    const filteredReasons = Array.isArray(response['raiMediaFilteredReasons'])
+    const reportedReasons = Array.isArray(response['raiMediaFilteredReasons'])
       ? response['raiMediaFilteredReasons'].filter((r): r is string => typeof r === 'string')
       : [];
 
     // The dominant Veo failure is not an exception, it is `done: true` with fewer videos
-    // than requested and no error anywhere. The requested count is not echoed back, so
-    // the caller must compare against its own sampleCount; `partial` here covers the
-    // case the operation itself admits to (a non-zero filtered count).
+    // than requested and no error anywhere. The requested count is not echoed back by
+    // Vertex, so it has to come from the caller; when it does, a shortfall is counted as
+    // filtered even where raiMediaFilteredCount is absent, which is the only way the
+    // silent case becomes visible at all.
+    const expected =
+      expectedSamples !== undefined && Number.isInteger(expectedSamples) && expectedSamples > 0
+        ? expectedSamples
+        : undefined;
+    const shortfall = expected === undefined ? 0 : Math.max(0, expected - videos.length);
+    const filteredCount = Math.max(reportedFiltered, shortfall);
+    const filteredReasons =
+      shortfall > reportedFiltered
+        ? [
+            ...reportedReasons,
+            `Vertex returned fewer videos than requested (${videos.length} of ${expected}) and ` +
+              `reported raiMediaFilteredCount=${reportedFiltered}. Google documents a short batch ` +
+              `as output blocked for safety, so the missing ${shortfall} are treated as filtered.`,
+          ]
+        : reportedReasons;
+
     const partial = filteredCount > 0 && videos.length > 0;
 
     if (videos.length === 0) {

@@ -409,15 +409,36 @@ function foldChar(ch: string, prev: string, next: string): string {
  * closed: a false BLOCK costs one regeneration, a false PASS costs an account.
  */
 export function normaliseAggressive(input: string): Normalised {
+  // Neighbours are read from the SOURCE string, so what counts as intra-word does not
+  // depend on which earlier characters happened to survive folding — but a RUN of
+  // substituted characters has to be looked past, or a doubled substitution defeats the
+  // whole thing: in "gu4r4nt33d" each "3" has the other "3" beside it, so neither was
+  // intra-word, neither folded, and the needle "guaranteed" did not match. Both
+  // neighbour scans therefore skip over invisible characters and over other
+  // substitutable characters, in one linear pass each. "$50" and "risk! free" still do
+  // not fold, because what sits beyond those runs is a space, not a letter.
+  const before: string[] = new Array<string>(input.length).fill('');
+  const after: string[] = new Array<string>(input.length).fill('');
+  let carry = '';
+  for (let i = 0; i < input.length; i++) {
+    before[i] = carry;
+    const raw = input[i] ?? '';
+    if (!INVISIBLE.has(raw) && !LEET.has(raw)) carry = raw;
+  }
+  carry = '';
+  for (let i = input.length - 1; i >= 0; i--) {
+    after[i] = carry;
+    const raw = input[i] ?? '';
+    if (!INVISIBLE.has(raw) && !LEET.has(raw)) carry = raw;
+  }
+
   let text = '';
   const map: number[] = [];
   let last = '';
   for (let i = 0; i < input.length; i++) {
     const raw = input[i];
     if (raw === undefined || INVISIBLE.has(raw)) continue;
-    // Neighbours are read from the SOURCE string, so what counts as intra-word does not
-    // depend on which earlier characters happened to survive folding.
-    for (const ch of foldChar(raw, input[i - 1] ?? '', input[i + 1] ?? '')) {
+    for (const ch of foldChar(raw, before[i] ?? '', after[i] ?? '')) {
       if (ch === last) continue; // collapse runs, symmetrically on needle and haystack
       text += ch;
       map.push(i);
@@ -482,11 +503,26 @@ export function findPhrase(haystack: string, phrase: string): PhraseMatch | unde
   if (start === undefined || endMapped === undefined) return undefined;
   const end = endMapped + 1;
 
+  const evasion = !containsAsWord(normalisePlain(haystack), normalisePlain(phrase));
+  if (evasion && start > 0 && /[\p{L}\p{N}]/u.test(haystack.charAt(start - 1))) {
+    // The aggressive pass strips separators, so a needle can land INSIDE a longer word:
+    // neverSay "cure" matched "seCURE checkout" and "maniCURE", and "fair trade" matched
+    // "unFAIR TRADEs". Those are Scunthorpe hits, not evasions, and a BLOCK on "secure
+    // checkout" stops an unattended publisher on copy nobody would ever write to evade.
+    //
+    // A real evasion ("g u a r a n t e e d", "gu4ranteed", "guar​anteed") still begins
+    // where the word begins, so requiring a non-alphanumeric character before the match
+    // keeps every evasion and drops the infixes. The END is deliberately NOT guarded:
+    // "guaranteed" must keep matching the phrase "guarantee", which is a suffix
+    // extension, not a different word.
+    return undefined;
+  }
+
   return {
     start,
     end,
     text: haystack.slice(start, end),
-    evasion: !containsAsWord(normalisePlain(haystack), normalisePlain(phrase)),
+    evasion,
   };
 }
 
@@ -718,7 +754,7 @@ function screenLikeness(brand: ScreenBrand, creative: CreativeDescriptor): Findi
   // about resemblance to a real subject, not about whether a face is on screen — and
   // Meta's Feb 2026 suits named "altered images AND voices". Keying only on the presenter
   // kind let a licensed voice clone into Germany with no in-creative disclosure at all.
-  if (creative.aiGenerated && (LIKENESS_KINDS.has(p.kind) || SYNTHETIC_VOICE_CLONES.has(p.voice))) {
+  if (isAiGenerated(creative) && (LIKENESS_KINDS.has(p.kind) || SYNTHETIC_VOICE_CLONES.has(p.voice))) {
     const eu = brand.countries.filter((c) => EU_EEA.has(c.toUpperCase()));
     if (eu.length > 0) {
       findings.push({
@@ -786,7 +822,15 @@ const RULES: readonly LexicalRule[] = [
     severity: 'BLOCK',
     policy: POLICIES.unrealisticOutcomes,
     scope: 'copy',
-    pattern: /\b(lose|shed|drop|gain|earn|make|generate|erase|melt)\b[^.!?\n]{0,60}?\b(in|within)\s+(just\s+|as little as\s+|only\s+)?\d+\s*(second|minute|hour|day|week|month)s?\b/giu,
+    // Two arms, because the verb alone does not make an outcome promise. `lose/shed/melt`
+    // take a body-outcome object almost by construction, so a timeframe after them is the
+    // violation. `make/generate/earn/gain/drop` are ordinary English — "Make dinner in 15
+    // minutes", "Generate a report in 30 seconds", "Drop your files in 5 seconds" are a
+    // meal kit, a BI tool and a file host, and BLOCKing them stops legitimate advertising
+    // cold — so those verbs additionally require a QUANTIFIED outcome (money, a
+    // percentage, a weight, a count) between the verb and the timeframe. "Make $5,000 in
+    // 30 days" still fires; "Make dinner in 15 minutes" no longer does.
+    pattern: /\b(?:(?:lose|shed|erase|melt|burn|shrink)\b[^.!?\n]{0,60}?|(?:gain|drop|earn|make|generate|pocket|bank)\b[^.!?\n]{0,40}?(?:[$£€]\s?\d|\b\d[\d,.]*\s*(?:%|percent\b|x\b|times\b|lbs?\b|pounds?\b|kgs?\b|kilos?\b|stone\b|inches\b|dress\s+sizes\b|followers?\b|subscribers?\b|leads?\b|sales?\b|customers?\b|clients?\b|dollars?\b))[^.!?\n]{0,40}?)\b(in|within)\s+(just\s+|as little as\s+|only\s+)?\d+\s*(second|minute|hour|day|week|month)s?\b/giu,
     message:
       'Specific outcome plus a short timeframe. This is the exact shape Unrealistic Outcomes forbids, and ' +
       'it is also what maximises CTR — which is why an unconstrained DR copywriter generates it constantly.',
@@ -964,7 +1008,7 @@ function screenRulePack(creative: CreativeDescriptor): Finding[] {
   const chunks = chunksOf(creative);
 
   for (const rule of RULES) {
-    if (rule.aiOnly === true && !creative.aiGenerated) continue;
+    if (rule.aiOnly === true && !isAiGenerated(creative)) continue;
     for (const chunk of chunks) {
       if (rule.scope !== 'both' && rule.scope !== chunk.kind) continue;
       // Fresh regex per scan: the table's patterns are global, and a shared lastIndex
@@ -1009,9 +1053,18 @@ const SECOND_PERSON = /^(you|youre|your|yours|yourself|u|ur)$/u;
  * covers what a lexicon cannot.
  */
 const ATTRIBUTE_PATTERNS: readonly (readonly [string, RegExp])[] = [
-  ['physical or mental health', /\b(diabetes|diabetic|cancer|hiv|aids|depression|depressed|anxiety|adhd|autism|autistic|arthritis|obese|obesity|overweight|erectile\s+dysfunction|hair\s+loss|balding|incontinence|menopause|menopausal|infertility|infertile|insomnia|chronic\s+pain|addiction|addicted|alcoholic|std|herpes|psoriasis|eczema|ibs)\b/giu],
-  ['disability', /\b(disabled|disability|wheelchair|handicapped|deaf|blind|amputee)\b/giu],
-  ['vulnerable financial status', /\b(bad\s+credit|poor\s+credit|no\s+credit|in\s+debt|drowning\s+in\s+debt|bankrupt(cy)?|foreclosure|evicted|low[-\s]income|broke|unemployed|jobless|laid\s+off)\b/giu],
+  ['physical or mental health', /\b(diabetes|diabetics?|cancer|hiv|aids|depression|depressed|anxiety|adhd|autism|autistic|arthritis|obese|obesity|overweight|erectile\s+dysfunction|hair\s+loss|balding|incontinence|menopause|menopausal|infertility|infertile|insomnia|chronic\s+pain|addiction|addicted|alcoholics?|std|herpes|psoriasis|eczema|ibs)\b/giu],
+  // "blind" needs its idioms carved out: "check your blind spot", "a blind test", "a
+  // blind date" are not disability references, and a BLOCK on them stops legitimate
+  // automotive and research copy dead.
+  ['disability', /\b(disabled|disability|wheelchair|handicapped|deaf|blind(?!\s+(?:spot|test|tasting|date|corner|side|study|trial|panel))|amputees?)\b/giu],
+  // Two carve-outs, both of which were blocking ordinary DR copy outright:
+  //   * "no credit" fired on "No credit card required" — arguably the single most common
+  //     sentence in software direct response. The financial-vulnerability sense is
+  //     "no credit check" / "no credit history", never "no credit card".
+  //   * bare "broke" is far more often the past tense of "break" ("your last blender
+  //     broke") than the financial adjective, so it now needs a copular/idiomatic frame.
+  ['vulnerable financial status', /\b(bad\s+credit|poor\s+credit|no\s+credit(?!\s+cards?\b)|in\s+debt|drowning\s+in\s+debt|bankrupt(cy)?|foreclosure|evicted|low[-\s]income|(?:(?:i|you|we|they)\s*['’]?\s*(?:m|re)|am|is|are|was|were|feel|feeling|being|flat|going|dead|too|so|still)\s+(?:\p{L}+\s+){0,2}broke|unemployed|jobless|laid\s+off)\b/giu],
   // Age is the one attribute whose lexicon is mostly digits, so it needs the most
   // guarding in both directions. Two defects fixed here:
   //   * `(4|5|6|7|8)0\s?\+` followed by the group-level `\b` was DEAD. "+" is not a word
@@ -1021,15 +1074,38 @@ const ATTRIBUTE_PATTERNS: readonly (readonly [string, RegExp])[] = [
   //     BLOCK on copy containing no age reference whatsoever. The plural-noun and
   //     percent lookaheads reject the "over N <things>" counting sense.
   // The currency/digit lookbehind keeps "$50 + free shipping" out of the age lexicon.
-  ['age', /(\b(?:over|aged?)[-\s]+(?:4|5|6|7|8)0s\b|\b(?:over|aged?)\s+(?:4|5|6|7|8)0\b(?!\s*%)(?!\s+percent\b)(?!\s+\p{L}+s\b)|(?<![$£€\d.,])\b(?:4|5|6|7|8)0\+|\b(?:4|5|6|7|8)0\s+(?:and|or)\s+(?:over|older|above|up)\b|\bin\s+your\s+(?:4|5|6|7|8)0s\b|\bsenior\s+citizens?\b|\bretirees?\b|\belderly\b|\bpensioners?\b|\bbaby\s+boomers?\b)/giu],
+  //   * The bare "N0+" arm ALSO counted, not just aged: "40+ hours of playback",
+  //     "50+ integrations", "60+ recipes" are quantities, and next to any "your" they
+  //     were a BLOCK. It now carries the same plural-noun and unit lookaheads the
+  //     "over N" arm already had, so "the 50+ crowd" still fires and "40+ hours" does not.
+  ['age', /(\b(?:over|aged?)[-\s]+(?:4|5|6|7|8)0s\b|\b(?:over|aged?)\s+(?:4|5|6|7|8)0\b(?!\s*%)(?!\s+percent\b)(?!\s+\p{L}+s\b)|(?<![$£€\d.,])\b(?:4|5|6|7|8)0\+(?!\s*\p{L}+s\b)(?!\s*(?:hour|hr|minute|min|second|sec|day|week|month|year|mile|km|kg|lb|pound|item|page|colou?r|flavou?r|design|style|recipe|feature|integration|template|location|store|brand|option|channel|course|lesson|review|country|language|partner|customer|client|user|member|project|tool|model|size|photo|video|episode|question|exercise|workout|meal|ingredient|award|patent)\b)|\b(?:4|5|6|7|8)0\s+(?:and|or)\s+(?:over|older|above|up)\b|\bin\s+your\s+(?:4|5|6|7|8)0s\b|\bsenior\s+citizens?\b|\bretirees?\b|\belderly\b|\bpensioners?\b|\bbaby\s+boomers?\b)/giu],
   ['religion or beliefs', /\b(muslim|christian|jewish|catholic|hindu|buddhist|atheist|evangelical|orthodox\s+jew)\b/giu],
   ['sexual orientation or gender identity', /\b(gay|lesbian|bisexual|transgender|trans\s+(man|woman|people)|lgbtq?\+?)\b/giu],
   ['race or ethnicity', /\b(african[-\s]american|latino|latina|latinx|hispanic|native\s+american|immigrants?|undocumented)\b/giu],
-  ['family or relationship status', /\b(single\s+(mom|mum|dad|parent|mothers?|fathers?)|divorced|divorcee|widow(ed|er)?|newly\s+single)\b/giu],
+  ['family or relationship status', /\b(single\s+(moms?|mums?|dads?|parents?|mothers?|fathers?)|divorced|divorcees?|widow(s|ed|ers?)?|newly\s+single)\b/giu],
   ['criminal record', /\b(felony|felons?|criminal\s+record|convicted|ex[-\s]offenders?|arrested|dui)\b/giu],
   ['trade union membership', /\b(union\s+members?|unionised|unionized)\b/giu],
   ['pregnancy', /\b(pregnant|pregnancy|expecting\s+a\s+baby|trying\s+to\s+conceive)\b/giu],
 ];
+
+/**
+ * The attribute is attached to a THIRD-PERSON GROUP, not to the reader: "options for
+ * people managing diabetes", "designed for runners over 40". Meta's rule is about
+ * asserting or implying knowledge of *the reader's* attribute, and this shape asserts
+ * nothing about them — it is, verbatim, the rewrite this very rule's `remedy` asks for.
+ *
+ * Before this existed, that remedy was unusable: "Support for people managing diabetes.
+ * Find your plan." BLOCKed, so the rewriter's compliant output tripped the same rule that
+ * demanded it and burned the second of two remediation attempts. It is a downgrade to
+ * WARN rather than an exemption, because "for people with bad credit — you're approved"
+ * is still worth a look from the model tier; WARN keeps the signal without refusing to
+ * publish.
+ *
+ * Deliberately requires an explicit group noun. A bare preposition would swallow "Rates
+ * for retirees like you", which really is the violation.
+ */
+const THIRD_PERSON_GROUP_FRAME =
+  /\b(?:for|among|by|serving|helping|supporting|supports)\s+(?:the\s+|our\s+|all\s+|many\s+|most\s+|other\s+)?(?:\p{L}+\s+){0,2}(?:people|persons|adults|men|women|families|parents|patients|customers|clients|members|individuals|residents|drivers|runners|shoppers|readers|users|students|workers|professionals|veterans|those|anyone|everyone|homeowners|renters|households|teams|businesses|carers|caregivers)\s+(?:\p{L}+\s+){0,3}$/iu;
 
 interface Token {
   readonly text: string;
@@ -1075,9 +1151,23 @@ function screenPersonalAttributes(creative: CreativeDescriptor): Finding[] {
 
     for (const [label, pattern] of ATTRIBUTE_PATTERNS) {
       const re = new RegExp(pattern.source, pattern.flags);
+      // Collect every in-window match for this attribute class BEFORE reporting one.
+      // Only one finding per (field, class) is emitted — the rewriter re-screens — but
+      // which one matters now that a third-person frame downgrades to WARN: reporting the
+      // first match would let "Loans for people with bad credit. Are you in debt?" come
+      // back WARN, because the framed occurrence was found first and stopped the scan.
+      // A BLOCK-worthy occurrence anywhere in the field wins.
+      interface Candidate {
+        readonly match: string;
+        readonly index: number;
+        readonly pronoun: Token;
+        readonly distance: number;
+        readonly thirdPerson: boolean;
+      }
+      const candidates: Candidate[] = [];
       let m: RegExpExecArray | null;
-      let reported = false;
-      while (!reported && (m = re.exec(chunk.text)) !== null) {
+      while ((m = re.exec(chunk.text)) !== null) {
+        if (m[0] === '') { re.lastIndex++; continue; }
         const at = tokenIndexAt(tokens, m.index);
         let nearest: number | undefined;
         let best = Number.POSITIVE_INFINITY;
@@ -1089,25 +1179,40 @@ function screenPersonalAttributes(creative: CreativeDescriptor): Finding[] {
           }
         }
         if (nearest === undefined || best > PERSONAL_ATTRIBUTE_WINDOW_TOKENS) continue;
-
         const pron = tokens[nearest];
         if (pron === undefined) continue;
-        const start = Math.min(pron.start, m.index);
-        const end = Math.max(pron.end, m.index + m[0].length);
+        candidates.push({
+          match: m[0],
+          index: m.index,
+          pronoun: pron,
+          distance: best,
+          thirdPerson: THIRD_PERSON_GROUP_FRAME.test(chunk.text.slice(Math.max(0, m.index - 80), m.index)),
+        });
+      }
+      const chosen = candidates.find((c) => !c.thirdPerson) ?? candidates[0];
+      if (chosen !== undefined) {
+        const start = Math.min(chosen.pronoun.start, chosen.index);
+        const end = Math.max(chosen.pronoun.end, chosen.index + chosen.match.length);
         findings.push({
           ruleId: 'personal-attributes.second-person-proximity',
-          severity: 'BLOCK',
+          severity: chosen.thirdPerson ? 'WARN' : 'BLOCK',
           policy: POLICIES.personalAttributes,
           message:
-            `Second person "${pron.text}" sits ${best} token(s) from "${m[0]}" (${label}). Ads must not assert or ` +
-            `imply personal attributes, including implying the advertiser KNOWS the reader's health, financial ` +
-            `or personal information. Second person alone is fine; the conjunction is what violates.`,
+            `Second person "${chosen.pronoun.text}" sits ${chosen.distance} token(s) from "${chosen.match}" ` +
+            `(${label}). Ads must not assert or imply personal attributes, including implying the advertiser ` +
+            `KNOWS the reader's health, financial or personal information. Second person alone is fine; the ` +
+            `conjunction is what violates.` +
+            (chosen.thirdPerson
+              ? ` Downgraded to WARN: "${chosen.match}" is attached to a third-person group here, not to the ` +
+                `reader, which is the permitted form — but a nearby "${chosen.pronoun.text}" can still read as ` +
+                `addressing them, so the model tier should look.`
+              : ''),
           remedy:
-            `Rewrite in the third person about a group, not the reader: "for people managing ${m[0]}" rather than ` +
-            `"${pron.text} ... ${m[0]}". A passing reference to an age range with no "you" is also permitted.`,
+            `Rewrite in the third person about a group, not the reader: "for people managing ${chosen.match}" ` +
+            `rather than "${chosen.pronoun.text} ... ${chosen.match}". A passing reference to an age range with ` +
+            `no "you" is also permitted.`,
           span: spanFrom(chunk, start, end),
         });
-        reported = true; // one per (field, attribute class) — the rewriter re-screens
       }
     }
   }
@@ -1155,7 +1260,11 @@ const CATEGORY_SIGNALS: readonly CategorySignal[] = [
     // CREDIT is the DEPRECATED input, superseded by FINANCIAL_PRODUCTS_SERVICES on
     // 2025-01-14 for US advertisers/audiences. Both still satisfy the requirement.
     satisfiedBy: ['CREDIT', 'FINANCIAL_PRODUCTS_SERVICES'],
-    pattern: /\b(credit\s+cards?|credit\s+scores?|credit\s+repair|no\s+credit\s+check|personal\s+loans?|auto\s+loans?|student\s+loans?|debt\s+consolidation|line\s+of\s+credit|refinanc(e|ing)\s+your|\bapr\b)\b/giu,
+    // "credit card" is a credit signal only when the ad is about one. "No credit card
+    // required" / "no credit card needed" is a friction-removal line on a free trial and
+    // has nothing to do with the CREDIT special ad category — it was BLOCKing every
+    // SaaS trial ad in the corpus.
+    pattern: /\b((?<!\bno\s)(?<!\bwithout\s)credit\s+cards?(?!\s+(?:required|needed|necessary))|credit\s+scores?|credit\s+repair|no\s+credit\s+check|personal\s+loans?|auto\s+loans?|student\s+loans?|debt\s+consolidation|line\s+of\s+credit|refinanc(e|ing)\s+your|\bapr\b)\b/giu,
     remedy: 'Set special_ad_categories = ["FINANCIAL_PRODUCTS_SERVICES"] with special_ad_category_country, or remove the credit framing.',
   },
   {
@@ -1306,9 +1415,16 @@ interface ClaimMarker {
   readonly isOffer?: (left: string, right: string) => boolean;
 }
 
-const MONEY_OFFER_LEFT = /\b(for|from|only|just|starting\s+at|priced\s+at|was|now|save|off|discount)\s*[:\-]?\s*$/iu;
+const MONEY_OFFER_LEFT = /\b(for|from|only|just|starting\s+at|priced\s+at|was|now|save|off|discount|spend|spends|spending|orders?\s+over|purchases?\s+over|minimum|under)\s*[:\-]?\s*$/iu;
 const OFFER_RIGHT = /^\s*(off\b|discount\b)/iu;
 const PERCENT_OFFER_LEFT = /\b(save|saving)\s*$/iu;
+/**
+ * A guarantee ABOUT THE PURCHASE is a standard DR offer term, not an efficacy claim —
+ * the rule pack says so explicitly ("a money-back or satisfaction guarantee ... is fine")
+ * and then the claim-set stage BLOCKed it anyway as an unsubstantiated efficacy marker.
+ * The two stages have to agree or the screen refuses to publish ordinary offers.
+ */
+const GUARANTEE_OFFER_LEFT = /\b(money[-\s]?back|money\s+back|satisfaction|happiness|price|lowest[-\s]?price|best[-\s]?price|lifetime|no[-\s]?quibble|\d+[-\s]?day)\s*$/iu;
 
 const CLAIM_MARKERS: readonly ClaimMarker[] = [
   {
@@ -1331,10 +1447,20 @@ const CLAIM_MARKERS: readonly ClaimMarker[] = [
     pattern: /[$£€]\s?\d[\d,.]*\s*(k\b|m\b|million)?/giu,
     isOffer: (left, right) => MONEY_OFFER_LEFT.test(left) || OFFER_RIGHT.test(right),
   },
-  { label: 'efficacy', pattern: /\b(cures?|heals?|eliminates?|reverses?|prevents?|clinically\s+proven|scientifically\s+proven|medically\s+proven|fda[-\s]approved|doctor[-\s]recommended|clinically\s+tested|guaranteed?)\b/giu },
-  { label: 'superlative', pattern: /(#\s?1\b|\bno\.?\s?1\b|\bnumber\s+one\b|\bbest\b|\bthe\s+only\b|\bfastest\b|\bstrongest\b|\bmost\s+effective\b|\bunbeatable\b|\bnever\s+fails\b)/giu },
+  {
+    label: 'efficacy',
+    pattern: /\b(cures?|heals?|eliminates?|reverses?|prevents?|clinically\s+proven|scientifically\s+proven|medically\s+proven|fda[-\s]approved|doctor[-\s]recommended|clinically\s+tested|guaranteed?)\b/giu,
+    isOffer: (left) => GUARANTEE_OFFER_LEFT.test(left),
+  },
+  {
+    label: 'superlative',
+    // "best seller" is a catalogue label, not a superlative claim about the product's
+    // performance, and "Shop our best sellers" is not a proposition anyone substantiates.
+    pattern: /(#\s?1\b|\bno\.?\s?1\b|\bnumber\s+one\b|\bbest\b(?![-\s]+sell)|\bthe\s+only\b|\bfastest\b|\bstrongest\b|\bmost\s+effective\b|\bunbeatable\b|\bnever\s+fails\b)/giu,
+  },
   { label: 'comparative', pattern: /\b(\d+x|twice|double|triple|\d+\s*times)\s+(better|faster|stronger|more|longer|cheaper)\b/giu },
-  { label: 'certification', pattern: /\b(certified|patented|award[-\s]winning|iso\s?\d+|organic|non[-\s]gmo|vegan|cruelty[-\s]free)\b/giu },
+  // "organic reach/traffic/search" is marketing vocabulary, not a certification.
+  { label: 'certification', pattern: /\b(certified|patented|award[-\s]winning|iso\s?\d+|organic(?!\s+(?:reach|traffic|search|growth|results?|posts?|social|listings?|rankings?))|non[-\s]gmo|vegan|cruelty[-\s]free)\b/giu },
 ];
 
 const STOPWORDS: ReadonlySet<string> = new Set([
@@ -1500,6 +1626,75 @@ function screenClaimSet(brand: ScreenBrand, creative: CreativeDescriptor): Findi
 // The screen
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Stage: input validation (design rule 1 — fail closed)
+// ---------------------------------------------------------------------------
+
+const KNOWN_PRESENTER_KINDS: ReadonlySet<string> = new Set<PresenterKind>([
+  'none', 'voice_only', 'animated_character', 'synthetic_human', 'real_human',
+]);
+const KNOWN_PRESENTER_FRAMINGS: ReadonlySet<string> = new Set<PresenterFraming>([
+  'presenter', 'narrator', 'customer_testimonial',
+]);
+const KNOWN_VOICE_KINDS: ReadonlySet<string> = new Set<VoiceKind>([
+  'none', 'synthetic_generic', 'cloned_licensed', 'cloned_unlicensed', 'real_recorded',
+]);
+
+/**
+ * Fail closed on a descriptor this module cannot reason about. The types say these
+ * fields are unions and a boolean, but the descriptor is assembled by a generator from
+ * model output and config, and TypeScript is erased at runtime: a `kind: "human"` typo
+ * matched no rule, was screened by nothing, and came out `PASS` — which is precisely
+ * the "an unknown presenter kind is a BLOCK, never a PASS" case in this file's own
+ * header. Likewise an absent `aiGenerated` silently switched off every `aiOnly` rule,
+ * which is the default the field exists to prevent.
+ */
+function screenInputs(_brand: ScreenBrand, creative: CreativeDescriptor): Finding[] {
+  const findings: Finding[] = [];
+  const p = creative.presenter;
+
+  if (typeof creative.aiGenerated !== 'boolean') {
+    findings.push({
+      ruleId: 'input.ai-flag-missing',
+      severity: 'BLOCK',
+      policy: POLICIES.unacceptableBusinessPractices,
+      message:
+        `CreativeDescriptor.aiGenerated is ${JSON.stringify(creative.aiGenerated)}, not a boolean. Every ` +
+        `AI-only rule (the realness claim, the EU Art. 50 disclosure) keys on it, so an absent flag silently ` +
+        `disables them. Screening proceeds as if the creative IS AI-generated.`,
+      remedy: 'Set aiGenerated explicitly on the descriptor. It is required and must never be defaulted.',
+    });
+  }
+
+  if (p !== undefined) {
+    const unknown: string[] = [];
+    if (!KNOWN_PRESENTER_KINDS.has(p.kind)) unknown.push(`kind=${JSON.stringify(p.kind)}`);
+    if (!KNOWN_PRESENTER_FRAMINGS.has(p.framing)) unknown.push(`framing=${JSON.stringify(p.framing)}`);
+    if (!KNOWN_VOICE_KINDS.has(p.voice)) unknown.push(`voice=${JSON.stringify(p.voice)}`);
+    if (unknown.length > 0) {
+      findings.push({
+        ruleId: 'input.unknown-presenter-value',
+        severity: 'BLOCK',
+        policy: POLICIES.euAiActArticle50,
+        message:
+          `Presenter carries unrecognised value(s): ${unknown.join(', ')}. The likeness stage keys on these exact ` +
+          `strings, so an unknown one matches no rule and the whole likeness gate — rights confirmation, cloned ` +
+          `voice, fabricated testimonial, EU disclosure — silently does not run. An input we cannot screen is a BLOCK.`,
+        remedy:
+          `Use one of kind ${[...KNOWN_PRESENTER_KINDS].join('|')}, framing ` +
+          `${[...KNOWN_PRESENTER_FRAMINGS].join('|')}, voice ${[...KNOWN_VOICE_KINDS].join('|')}.`,
+      });
+    }
+  }
+
+  return findings;
+}
+
+/** Fail closed: anything that is not literally `false` is screened as AI-generated. */
+function isAiGenerated(creative: CreativeDescriptor): boolean {
+  return creative.aiGenerated !== false;
+}
+
 interface Stage {
   readonly id: string;
   readonly run: (brand: ScreenBrand, creative: CreativeDescriptor) => Finding[];
@@ -1512,6 +1707,7 @@ interface Stage {
  * by default every stage runs.
  */
 const STAGES: readonly Stage[] = [
+  { id: 'input', run: screenInputs },
   { id: 'brand.prohibitions', run: screenBrandProhibitions },
   { id: 'likeness', run: screenLikeness },
   { id: 'rule-pack', run: (_b, c) => screenRulePack(c) },

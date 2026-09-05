@@ -891,6 +891,7 @@ export class VideoUploader {
     const firstOffset = session.startOffset;
     let chunkCount = 0;
     let lastStartOffset = -1;
+    let metaSaidSuccess = false;
 
     try {
       while (!skippedUpload && session.startOffset < session.endOffset) {
@@ -933,8 +934,28 @@ export class VideoUploader {
         session.startOffset = nextStart;
         session.endOffset = nextEnd;
 
-        if (next.success === true) break; // documented `finish` signal, seen on transfer too
+        if (next.success === true) {
+          metaSaidSuccess = true; // documented `finish` signal, seen on transfer too
+          break;
+        }
         if (nextStart >= size) break; // nothing left, whatever the offsets claim
+      }
+
+      // The loop's primary exit is `start_offset == end_offset`. Meta converging them
+      // EARLY therefore walks straight into `finish`, which builds an asset out of a
+      // partial file — and a truncated video transcodes into a short ad rather than an
+      // error, so nothing downstream would ever notice. Only Meta explicitly claiming
+      // completion (`success: true`) or `skip_upload` may end a transfer below EOF.
+      // Thrown as a plain Error on purpose: that leaves the session uncancelled, so the
+      // caller can resume from the recorded offset instead of re-sending the whole file.
+      if (!skippedUpload && !metaSaidSuccess && session.startOffset < size) {
+        throw new Error(
+          `advideos transfer ended at byte ${session.startOffset} of ${size}: Meta converged ` +
+            `start_offset and end_offset before the whole file had been sent (session ` +
+            `${session.uploadSessionId}). Refusing to run upload_phase=finish on a partial upload — ` +
+            `the asset would come back as a truncated video, not as an error. The session is still ` +
+            `open: resume from ${session.startOffset}.`,
+        );
       }
 
       const finished = await this.finishUpload(session.uploadSessionId, {
@@ -1320,7 +1341,15 @@ export class VideoUploader {
     try {
       parsed = text ? parseBigIntSafe(text) : {};
     } catch {
-      throw new Error(`Non-JSON response from Meta (HTTP ${res.status}): ${text.slice(0, 400)}`);
+      const detail = `Non-JSON response from Meta (HTTP ${res.status}): ${text.slice(0, 400)}`;
+      // An intermediary's HTML error page is an HTTP-level failure exactly like a bodyless
+      // one, and has to classify the same way. Raised as a plain Error it was invisible to
+      // `isWorthRetrying`, so the two callers that exist to survive a gateway blip did not:
+      // `pollUntilReady` aborted on the first HTML 502 and sent the caller off to re-upload
+      // a video Meta was already transcoding, while a bodyless 502 one second earlier would
+      // have been absorbed. `code: -1` keeps it distinguishable from a real Graph error.
+      if (!res.ok) throw new MetaApiError({ message: detail, code: -1 }, res.status);
+      throw new Error(detail);
     }
 
     if (typeof parsed === 'object' && parsed !== null && 'error' in parsed) {

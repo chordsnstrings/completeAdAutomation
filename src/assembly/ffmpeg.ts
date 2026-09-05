@@ -136,6 +136,16 @@ export function diagnoseFfmpegStderr(stderr: string): string | undefined {
       `fontsdir to the ass filter.`
     );
   }
+  const noStream = /Stream map '([^']+)' matches no streams/.exec(stderr);
+  if (noStream?.[1] !== undefined) {
+    return (
+      `the input has no stream matching "${noStream[1]}". [MEASURED] this is what a silent ` +
+      `generated clip does to buildReframeCommand, whose default withAudio maps 0:a: ffmpeg ` +
+      `exits 234 and its last line is the useless "Error opening output files: Invalid argument". ` +
+      `Either the clip really has no audio track (pass encode.withAudio: false) or the wrong ` +
+      `input index was mapped.`
+    );
+  }
   if (/No such file or directory/.test(stderr)) {
     return `an input path does not exist: ${lastStderrLine(stderr)}`;
   }
@@ -1009,7 +1019,19 @@ export function buildLoudnormApplyCommand(
     '-af', buildLoudnormFilter(m, target),
     '-c:v', 'copy',
     '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
-    '-movflags', '+faststart',
+    // Same goal as buildEncodeArgs — no `elst` — but NOT the same flags, and the difference
+    // is measured, not stylistic. This pass re-muxes, so it re-creates the edit list the
+    // encode pass was careful not to write: [MEASURED] with `+faststart` alone the output
+    // carries edit lists on BOTH tracks and fails gateContainerSpec, even though `-c:v copy`
+    // never touches a frame.
+    //
+    // On a COPY the reorder delay is already baked into the packet timestamps, so
+    // `-use_editlist 0` on its own leaves the track duration at 12.063s over 289 frames ->
+    // avg_frame_rate 289000/12063 = 23.958 against r_frame_rate 24/1, and parseProbeJson
+    // then reports a perfectly constant file as VFR. Adding `+negative_cts_offsets` here
+    // restores duration 12.041667s / avg 24/1 / start_time 0.000000 with no elst.
+    // buildEncodeArgs wants the opposite pairing for the same reason inverted — see its doc.
+    '-movflags', '+faststart+negative_cts_offsets', '-use_editlist', '0',
     output,
   ];
 }
@@ -1191,7 +1213,20 @@ export function buildAssFile(
     // Must equal the video dimensions or every size and margin is silently scaled.
     `PlayResX: ${canvas.width}`,
     `PlayResY: ${canvas.height}`,
-    'WrapStyle: 2',
+    // 0 = smart wrapping with evenly balanced lines. NOT the dossier's `WrapStyle: 2`,
+    // which means "no automatic wrapping at all" — and the dossier's own measurement could
+    // not see the difference, because every event it rendered was a short one ("THIS IS THE
+    // HOOK", 636px wide on a 1080px canvas).
+    //
+    // [MEASURED here] one line of realistic ad copy (33 characters at the default 72px
+    // bold DejaVu Sans) rendered through `bbox` on the overlay layer:
+    //   WrapStyle 2 -> bbox x 0..1079 on 43/43 frames: full-bleed, clipped at BOTH frame
+    //                  edges, every frame outside the 6% side safe zone.
+    //   WrapStyle 1 -> x 81..993, inside.
+    //   WrapStyle 0 -> x 221..830, inside and balanced across two lines.
+    // MarginL/MarginR (65px = 6%) only constrain the wrap width once wrapping is on, so
+    // with WrapStyle 2 the safe-zone margins this module computes do nothing at all.
+    'WrapStyle: 0',
     'ScaledBorderAndShadow: yes',
     'YCbCr Matrix: TV.709',
     '',
@@ -1242,9 +1277,26 @@ export interface EncodeOptions {
   /** Keyframe interval in seconds. 2s closed GOP is what Meta's transcoder wants. */
   readonly gopSeconds: number;
   readonly level: string;
-  /** `+bitexact` and `-map_metadata -1`; required for a content-addressed render cache. */
+  /**
+   * Byte-reproducible output, for a content-addressed render cache.
+   *
+   * `+bitexact` and `-map_metadata -1` strip the encoder string and creation time, but
+   * they are NOT sufficient on their own. [MEASURED here, ffmpeg 6.1.1] three runs of one
+   * identical concat+encode produced three different files (6164190 / 6175360 / 6170983
+   * bytes) — the BITSTREAM differs, not just the metadata. Isolated: the filter graph is
+   * bit-exact (identical `-f framemd5` over three runs); dropping `-maxrate`/`-bufsize`
+   * makes it reproducible; pinning `threads=1` makes it reproducible; `threads=2` and
+   * `threads=4` do NOT. The cause is x264's row-level VBV rate control reading the
+   * progress of frames encoding concurrently, which is thread-timing dependent. Since
+   * `buildEncodeArgs` always emits VBV, determinism costs single-threaded encoding
+   * (measured 8.8s vs 3.7s wall for a 12s 1080x1920 render on 4 cores). Set this false to
+   * buy that back and give up cache hits.
+   */
   readonly deterministic: boolean;
-  /** Guards against an `elst` edit list, which Meta's container spec forbids. */
+  /**
+   * `-avoid_negative_ts make_zero`. It shifts timestamps; it does NOT suppress the `elst`
+   * edit list — see `buildEncodeArgs`, where that is handled by `-use_editlist 0`.
+   */
   readonly avoidNegativeTs: boolean;
   readonly withAudio: boolean;
 }
@@ -1277,6 +1329,32 @@ export class EncodeSettingsError extends Error {
  * front, and the resulting error 6000 is indistinguishable from a dozen other faults.
  *
  * `+empty_moov` is NOT offered: the dossier marks its Meta-ingestion safety UNVERIFIED.
+ *
+ * `-use_editlist 0` and `+negative_cts_offsets` are equally non-optional, and neither was
+ * here before this pipeline was ever executed. [MEASURED here, ffmpeg 6.1.1] the mp4
+ * muxer writes an `edts`/`elst` box on EVERY track it produces — a 2-entry list on the
+ * video track (the empty edit that compensates the B-frame reorder delay) and one on the
+ * audio track (AAC encoder priming). It appears even on a video-only render with no AAC
+ * anywhere, because `bframes=2` alone is enough. The ads guide is verbatim: "Videos
+ * should not contain edit lists or special boxes in file containers", and `gateContainerSpec`
+ * blocks on it — so without these two flags every file this module renders fails its own
+ * QA gate and, if forced past it, is the second-commonest cause of error 6000.
+ * `-avoid_negative_ts make_zero` does NOT prevent it; that was the previous, wrong, guard.
+ *
+ * `+negative_cts_offsets` is deliberately NOT paired with it, which is counter-intuitive
+ * enough to be worth the paragraph. It does make the video track's `start_time` read
+ * 0.000000 instead of 0.083333 — but [MEASURED] it also inflates the track's reported
+ * duration by the reorder delay (12.041667s -> 12.125s over the same 289 frames), so
+ * `avg_frame_rate` comes back 2312/97 = 23.835 against an `r_frame_rate` of 24/1. That
+ * trips the CFR test in `parseProbeJson`, and `gateFrameRate` plus `validateAdVideoSpec`
+ * then reject a perfectly constant-frame-rate file as VFR. Trading a cosmetic `start_time`
+ * for a false VFR rejection is a bad trade.
+ *
+ * And the `start_time` it fixes is cosmetic: [MEASURED] on a clip with a one-frame white
+ * flash and a 20 ms click both authored at t=2.000s, the decoded flash/click separation is
+ * -0.0056s with the edit list, -0.0053s with `-use_editlist 0`, and -0.0053s with
+ * `+negative_cts_offsets` as well. Dropping the edit list shifts BOTH tracks by the same
+ * ~62 ms; it does not desynchronise them. There is no sync cost to pay for.
  */
 export function buildEncodeArgs(
   overrides: Partial<EncodeOptions> = {},
@@ -1340,7 +1418,12 @@ export function buildEncodeArgs(
     '-level', o.level,
     // Generative models routinely emit yuv444p or 10-bit; Meta answers with error 352.
     '-pix_fmt', 'yuv420p',
-    '-x264-params', `keyint=${gop}:min-keyint=${gop}:scenecut=0:bframes=2:ref=3`,
+    // `threads=1` only under `deterministic`: VBV row-level rate control reads the
+    // progress of concurrently encoding frames, so with any thread count above 1 the
+    // bitstream is timing-dependent and the content-addressed cache never hits. See the
+    // `deterministic` field doc for the measurement.
+    '-x264-params',
+    `keyint=${gop}:min-keyint=${gop}:scenecut=0:bframes=2:ref=3${o.deterministic ? ':threads=1' : ''}`,
     // VFR is the #1 cause of "uploaded fine but the audio drifts".
     '-r', num(o.fps),
     '-b:v', String(o.videoBitrateBps),
@@ -1352,13 +1435,15 @@ export function buildEncodeArgs(
   } else {
     args.push('-an');
   }
-  args.push('-movflags', '+faststart');
+  // moov to the front, and NO edit list. Both mandatory; see the function doc for what
+  // each costs if omitted, and for why `+negative_cts_offsets` is NOT here.
+  args.push('-movflags', '+faststart', '-use_editlist', '0');
   // Integer timescale; avoids fractional-timebase rounding when clips are concatenated.
   args.push('-video_track_timescale', String(Math.round(o.fps * 1000)));
   if (o.avoidNegativeTs) args.push('-avoid_negative_ts', 'make_zero');
   if (o.deterministic) {
-    // Without these ffmpeg stamps the encoder string and creation time, two identical
-    // renders differ in bytes, and the content-addressed store fills with duplicates.
+    // Strips the encoder string and creation time. NOT sufficient on its own — the
+    // `threads=1` above is the other half. See the `deterministic` field doc.
     args.push('-fflags', '+bitexact', '-flags:v', '+bitexact', '-flags:a', '+bitexact', '-map_metadata', '-1');
   }
   return args;

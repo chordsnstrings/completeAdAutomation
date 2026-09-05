@@ -210,6 +210,21 @@ function canon(value: unknown, path: string): string {
     );
   }
 
+  // Only plain objects hash meaningfully. A Map, a Set, a RegExp or a class instance
+  // with accessor-only state has NO own enumerable properties, so it canonicalises to
+  // `{}` — every one of them identical to every other. That is a silent collision
+  // between distinct intents, which is strictly worse than the Date case above, so it
+  // is refused for the same reason and just as loudly.
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) {
+    const ctor = (value as { constructor?: { name?: string } }).constructor?.name ?? 'object';
+    throw new IntentKeyError(
+      `${path}: a ${ctor} is not a plain object. Its state is not own enumerable ` +
+        `properties, so it would hash as {} and collide with every other ${ctor} — ` +
+        `convert it to the plain params Meta is actually sent.`,
+    );
+  }
+
   const obj = value as Record<string, unknown>;
   const parts: string[] = [];
   for (const key of Object.keys(obj).sort()) {
@@ -231,11 +246,24 @@ function canonNumber(n: number, path: string): string {
   if (!Number.isFinite(n)) {
     throw new IntentKeyError(`${path}: ${String(n)} is not representable in JSON.`);
   }
-  if (Number.isInteger(n)) return String(n === 0 ? 0 : n); // normalises -0 to 0
+  if (Number.isInteger(n)) {
+    if (!Number.isSafeInteger(n)) {
+      // Same precision bug as the bigint case, arriving by a quieter road. Meta ids are
+      // ~17 digits, past 2^53, so `page_id: 120210000000000001` and
+      // `…002` are the SAME double — two distinct intents collapsing onto one key, and
+      // the second publish would return the first object's id as ALREADY_CONFIRMED.
+      throw new IntentKeyError(
+        `${path}: ${String(n)} is beyond 2^53 and is not the number that was written — ` +
+          `doubles cannot distinguish adjacent Meta ids, so two different intents would ` +
+          `hash to one key. Pass the id as a string.`,
+      );
+    }
+    return String(n === 0 ? 0 : n); // normalises -0 to 0
+  }
   const factor = 10 ** FLOAT_PRECISION;
   // No overflow guard: every double large enough to overflow the scaling (|n| >= 2^52)
-  // is already an integer and returned above, so this multiplication cannot reach
-  // Infinity.
+  // is already an integer and returned or refused above, so this multiplication cannot
+  // reach Infinity.
   const rounded = Math.round(n * factor) / factor;
   return String(rounded === 0 ? 0 : rounded);
 }
@@ -298,6 +326,8 @@ function requireNonEmpty(v: string, field: string): void {
 // ---------------------------------------------------------------------------
 
 const NAME_STAMP = /\[idem:([0-9a-f]{32})\]/;
+/** Every stamp, with the space that precedes it — used to strip before re-stamping. */
+const NAME_STAMP_ALL = /\s*\[idem:[0-9a-f]{32}\]/g;
 
 /**
  * Conservative cap on a stamped object name.
@@ -328,7 +358,14 @@ export function stampIntentKey(baseName: string, key: string, maxLength = NAME_M
       `maxLength ${maxLength} leaves no room for the ${stamp.length}-char intent stamp.`,
     );
   }
-  const base = baseName.length > room ? baseName.slice(0, room) : baseName;
+  // Any stamp the base name already carries is stripped first. An autonomous system
+  // renames objects by editing the name it read back from Meta, so a base name arriving
+  // here pre-stamped is expected — and leaving both stamps in place is worse than
+  // useless: extractIntentKey returns the FIRST match, which is the stale one, so
+  // reconcileByLabel would reject the object as belonging to another intent and strand
+  // recovery on an object that is genuinely ours.
+  const stripped = baseName.replace(NAME_STAMP_ALL, '');
+  const base = stripped.length > room ? stripped.slice(0, room) : stripped;
   return `${base}${stamp}`;
 }
 
@@ -625,6 +662,18 @@ export interface LedgerOptions {
 }
 
 /**
+ * A copy of the params that matches, byte for byte, what the JSONL row holds.
+ *
+ * A spread would share every nested object with the caller, and the whole value of an
+ * append-only ledger is that what it says was reserved cannot be edited afterwards.
+ * Round-tripping through JSON also drops the `undefined` values that JSON.stringify
+ * omits from the row, so memory and disk agree.
+ */
+function cloneParams(params: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(params)) as Record<string, unknown>;
+}
+
+/**
  * Append-only intent ledger, persisted as JSONL.
  *
  * There is no database in this system, so durability is bought with the plainest thing
@@ -645,6 +694,12 @@ export class IntentLedger {
   private readonly byKey = new Map<string, IntentRecord>();
   /** Bytes of `path` this instance has accounted for. See assertSoleWriter. */
   private bytesOnDisk = 0;
+  /**
+   * Set when the file's last record is complete but its terminating newline is not.
+   * The next append then leads with one, so the two records cannot be welded together.
+   * See load().
+   */
+  private pendingNewline = false;
 
   constructor(opts: LedgerOptions) {
     this.path = opts.path;
@@ -688,6 +743,23 @@ export class IntentLedger {
       if (typeof event === 'string') throw new LedgerCorruptError(this.path, i + 1, event);
       this.apply(event, i + 1);
     }
+
+    // A crash inside writeSync can stop anywhere in the line — including one byte short
+    // of the end, leaving a record that is complete and parseable but unterminated. That
+    // one lands here rather than in the torn-tail branch above, and appending straight
+    // after it would weld two records into a single unparseable line that is no longer
+    // final, which the loop refuses forever: the ledger would be permanently unreadable
+    // and publishing cannot proceed without it. Truncating is not the answer either —
+    // the record is real and may be the CONFIRM that proves an object exists. So keep it
+    // and make the next append supply the missing separator.
+    if (this.bytesOnDisk > 0 && buf[this.bytesOnDisk - 1] !== 0x0a) {
+      this.pendingNewline = true;
+      warnings.push(
+        `the last record of ${this.path} is complete but its terminating newline is ` +
+          `missing, so the process died mid-append. The record has been kept and the ` +
+          `next append will start with a newline; nothing was discarded.`,
+      );
+    }
   }
 
   /**
@@ -714,6 +786,7 @@ export class IntentLedger {
       );
     }
     this.bytesOnDisk = keepBytes;
+    this.pendingNewline = false; // keepBytes lands on a record boundary, i.e. after a \n
   }
 
   /**
@@ -741,7 +814,7 @@ export class IntentLedger {
         kind: event.kind,
         role: event.role,
         mode: event.mode,
-        params: event.params,
+        params: cloneParams(event.params),
         state: 'PENDING',
         attempts: event.attempt,
         labelName: event.labelName,
@@ -801,7 +874,7 @@ export class IntentLedger {
     // State next, so an apply() that rejects the event never leaves a line on disk that
     // the next load would also reject.
     this.apply(event);
-    const line = `${JSON.stringify(event)}\n`;
+    const line = `${this.pendingNewline ? '\n' : ''}${JSON.stringify(event)}\n`;
     mkdirSync(dirname(this.path), { recursive: true });
     const fd = openSync(this.path, 'a');
     try {
@@ -811,6 +884,7 @@ export class IntentLedger {
       closeSync(fd);
     }
     this.bytesOnDisk += Buffer.byteLength(line, 'utf8');
+    this.pendingNewline = false;
   }
 
   /**
@@ -834,13 +908,29 @@ export class IntentLedger {
     }
   }
 
+  /**
+   * A record nobody outside can mutate.
+   *
+   * `params` in particular: the RESERVE row on disk is immutable, so an in-memory record
+   * that aliases the caller's params object lets a later mutation rewrite the audit
+   * trail — `all()` would then disagree with the file that is the actual evidence of
+   * what was published.
+   */
+  private copy(r: IntentRecord): IntentRecord {
+    return {
+      ...r,
+      params: cloneParams(r.params),
+      duplicateObjectIds: r.duplicateObjectIds === undefined ? undefined : [...r.duplicateObjectIds],
+    };
+  }
+
   get(key: string): IntentRecord | undefined {
     const r = this.byKey.get(key);
-    return r ? { ...r } : undefined;
+    return r ? this.copy(r) : undefined;
   }
 
   all(): IntentRecord[] {
-    return [...this.byKey.values()].map((r) => ({ ...r }));
+    return [...this.byKey.values()].map((r) => this.copy(r));
   }
 
   /** Intents that cannot be retried until a human or reconciliation resolves them. */
@@ -867,7 +957,7 @@ export class IntentLedger {
         if (metaObjectId === undefined) {
           throw new LedgerCorruptError(this.path, -1, `CONFIRMED intent ${key} has no object id`);
         }
-        return { status: 'ALREADY_CONFIRMED', key, metaObjectId, record: { ...existing } };
+        return { status: 'ALREADY_CONFIRMED', key, metaObjectId, record: this.copy(existing) };
       }
       if (existing.state === 'DUPLICATE') {
         throw new DuplicateObjectError(
@@ -904,7 +994,7 @@ export class IntentLedger {
       attempt,
       labelName: record.labelName,
       labelId: record.labelId,
-      record: { ...record },
+      record: this.copy(record),
       confirm: (metaObjectId: string) => this.confirm(key, metaObjectId),
       fail: (reason: string) => this.fail(key, reason),
       markAmbiguous: (reason: string) => this.markAmbiguous(key, reason),
@@ -1039,7 +1129,7 @@ export class IntentLedger {
   }
 
   private snapshot(key: string): IntentRecord {
-    return { ...this.require(key, 'snapshot') };
+    return this.copy(this.require(key, 'snapshot'));
   }
 }
 

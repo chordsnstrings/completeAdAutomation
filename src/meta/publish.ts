@@ -30,6 +30,7 @@
  *    hopes.
  */
 
+import { IllegalTupleError, validateSpec } from './objectives.ts';
 import type { ArchetypeSpec, ConversionArchetype, Objective } from './objectives.ts';
 import type { ResolvedAdConfig, SpecialAdCategory } from '../domain/brand.ts';
 
@@ -212,6 +213,12 @@ export function objectName(parts: NameParts): string {
   if (!/^[a-z0-9_]+$/.test(parts.archetype)) {
     fail('name', `archetype "${parts.archetype}" is not a lowercase identifier.`);
   }
+  // LEVEL_CODE and NAME_MAX_LENGTH are object literals, so an Object.prototype key
+  // ("constructor", "__proto__", "toString") indexes to something truthy and would be
+  // stringified straight into the name. Own-property only.
+  if (!Object.hasOwn(LEVEL_CODE, parts.level)) {
+    fail('name', `level "${String(parts.level)}" is not one of ${Object.keys(LEVEL_CODE).join(', ')}.`);
+  }
 
   const name = [NAME_PREFIX, parts.brandId, parts.archetype, LEVEL_CODE[parts.level], parts.variant]
     .join(NAME_SEPARATOR);
@@ -237,7 +244,10 @@ export function parseObjectName(name: string): NameParts | undefined {
   if (brandId === undefined || archetype === undefined || code === undefined || variant === undefined) {
     return undefined;
   }
-  const level = CODE_LEVEL[code];
+  // Own-property only: `CODE_LEVEL['constructor']` is a function, not undefined, so a
+  // name read back from Meta could otherwise yield a NameParts whose `level` matches no
+  // branch of ObjectLevel and silently mis-routes reconciliation.
+  const level = Object.hasOwn(CODE_LEVEL, code) ? CODE_LEVEL[code] : undefined;
   if (level === undefined) return undefined;
   return { brandId, archetype, level, variant };
 }
@@ -587,7 +597,20 @@ function assertRestrictedTargetingLegal(
 
   const regime = radiusRegime(countries);
   for (const city of input.geo.cities ?? []) {
-    if (city.radius === undefined) continue;
+    if (city.radius === undefined) {
+      // The unstated-unit refusal below exists because Meta publishes no default distance
+      // unit; it publishes no default RADIUS either, so a bare city key under a restricted
+      // category cannot be shown to clear the documented 15 mile / 25 km floor. Meta
+      // accepts it and picks its own radius, which is the silent rewrite this module
+      // refuses everywhere else.
+      fail(
+        'targeting.geo_locations.cities.radius',
+        `${label} imposes a minimum radius ("at least 15 mile or 25 kilometer radius for the US and Canada, ` +
+          `and 15 kilometer radius for Europe"), and city ${city.key} states none. Meta publishes no default ` +
+          `radius for a city key, so the floor cannot be shown to be met — state radius and distance_unit ` +
+          `explicitly, or target the country/region instead.`,
+      );
+    }
     if (city.distanceUnit === undefined) {
       fail(
         'targeting.geo_locations.cities.distance_unit',
@@ -1023,6 +1046,19 @@ function prepare(req: PublishRequest): Prepared {
       `AccountContext is for ${account.adAccountId} but brand "${brand.id}" publishes to ${brand.adAccountId}. ` +
         `Refusing to publish into the wrong ad account.`,
     );
+  }
+
+  // objectives.validateSpec is the legality matrix, but resolveAdConfig is the only
+  // caller of it. This module is the last gate before the transport, so a ResolvedAdConfig
+  // assembled anywhere else — by hand, or by an optimiser rebuilding a variant — must not
+  // be able to walk an illegal objective/destination_type/billing_event tuple onto the wire.
+  try {
+    validateSpec(spec);
+  } catch (e) {
+    if (e instanceof IllegalTupleError) {
+      fail(e.message.startsWith('billing_event') ? 'billing_event' : 'destination_type', e.message);
+    }
+    throw e;
   }
 
   const offset = resolveOffset(account);
@@ -1871,6 +1907,16 @@ export function conversionDomain(link: string | undefined, override?: string): s
 
   const host = safeHost(link).toLowerCase().replace(/\.$/, '');
   if (host === '') fail('conversion_domain', `could not read a host out of "${link}".`);
+
+  // An IP literal has no registrable domain, and slicing its last two labels yields a
+  // string ("100.7") that is neither the host nor a domain — Meta rejects it as a code 100.
+  if (/^\d+(?:\.\d+)*$/.test(host) || host.startsWith('[')) {
+    fail(
+      'conversion_domain',
+      `"${host}" is an IP literal, not a registrable domain. conversion_domain must be "only the first and ` +
+        `second level domains, and not the full URL" — pass options.conversionDomain with the real domain.`,
+    );
+  }
 
   const labels = host.split('.');
   if (labels.length < 2) fail('conversion_domain', `"${host}" has no registrable domain.`);

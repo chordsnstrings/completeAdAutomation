@@ -281,7 +281,15 @@ export interface VideoProvider {
   /** Gates the spec first: an unsupported spec has no cost, it has an error. */
   estimateCost(spec: GenerationSpec): CostEstimate;
   submit(spec: GenerationSpec): Promise<SubmitResult>;
-  poll(taskId: string): Promise<TaskStatus>;
+  /**
+   * `expectedSamples` is the sample count the job was submitted with — pass
+   * `SubmitResult.estimate.samples`. Providers that can return FEWER videos than were
+   * asked for use it to detect a silently short batch; on a provider whose
+   * `maxSamplesPerRequest` is 1 it is simply ignored. It is optional because the task id
+   * alone is enough to poll, but omitting it on Veo makes the provider's most common
+   * failure mode indistinguishable from success.
+   */
+  poll(taskId: string, expectedSamples?: number): Promise<TaskStatus>;
 }
 
 // ---------------------------------------------------------------------------

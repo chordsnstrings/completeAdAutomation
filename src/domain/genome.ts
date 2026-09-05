@@ -1301,6 +1301,22 @@ export function shouldRetireAngle(input: { performanceDeclining: boolean; covera
 export function validateGenome(g: CreativeGenome): ValidationResult {
   const errors: GenomeIssue[] = [];
   const warnings: GenomeIssue[] = [];
+
+  // A genome can arrive from a planner, a YAML file or a ledger row, so `template` is a
+  // string at runtime whatever the type says. An own-property check first, because
+  // `TEMPLATE_SPECS['toString']` is a function and `TEMPLATE_SPECS['carousel']` is
+  // undefined — both then throw a raw TypeError out of a function whose entire contract
+  // is to REPORT problems, and `assertValidGenome` is the thing callers wrap in a
+  // `catch (err) { if (err instanceof GenomeError) ... }` before spending money.
+  if (!Object.hasOwn(TEMPLATE_SPECS, g.template)) {
+    errors.push(issue(
+      'template_unknown',
+      'template',
+      `"${String(g.template)}" is not one of the ${CREATIVE_TEMPLATES.length} canonical templates (${CREATIVE_TEMPLATES.join(', ')}). ` +
+        'Nothing else about this vector can be judged without a template spec, so this is the only finding reported.',
+    ));
+    return { errors, warnings };
+  }
   const spec = TEMPLATE_SPECS[g.template];
 
   if (!ANGLE_ID_RE.test(g.angleId)) {
@@ -1605,11 +1621,19 @@ export function adNameForGenome(input: { brandId: string; archetype: string; gen
     return objectName({ brandId: input.brandId, archetype: input.archetype, level: 'ad', variant });
   } catch (err) {
     if (err instanceof PublishBuildError) {
+      // objectName refuses for two unrelated reasons: the name is too long, or one of
+      // the slugs is malformed. Re-labelling both as a length problem sends the operator
+      // to shorten an angle id that is already short, while the real cause (a brand slug
+      // with an underscore or a capital) sits unmentioned in the first sentence.
       const budget = NAME_MAX_LENGTH.ad - NAME_STAMP_RESERVE;
+      const isLengthFailure = /are available/.test(err.message);
       throw new GenomeError(
         'adName',
-        `genome code is ${variant.length} chars and will not fit the ${budget}-char ad-name budget alongside brand "${input.brandId}" and archetype "${input.archetype}". ` +
-          `The genome itself is fixed-width apart from the angle id ("${input.genome.angleId}"), so shorten the angle id or the brand slug. Underlying: ${err.message}`,
+        isLengthFailure
+          ? `genome code is ${variant.length} chars and will not fit the ${budget}-char ad-name budget alongside brand "${input.brandId}" and archetype "${input.archetype}". ` +
+            `The genome itself is fixed-width apart from the angle id ("${input.genome.angleId}"), so shorten the angle id or the brand slug. Underlying: ${err.message}`
+          : `the ad name for this genome could not be built, and the cause is the name's shape rather than its length ` +
+            `(the ${variant.length}-char genome code is within the ${budget}-char budget). Underlying: ${err.message}`,
       );
     }
     throw err;

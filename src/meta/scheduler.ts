@@ -280,12 +280,21 @@ export class MetaScheduler {
       }
     }
 
+    // One response can report the SAME use case under several business object ids. The
+    // gate is per use case, so those entries have to be folded together rather than
+    // overwriting each other — otherwise `worstPct` ends up holding whichever entry the
+    // header happened to list last, and an operator sees `ads_management 12%` next to a
+    // ten-minute block whose real cause was a sibling object at 96%.
+    const foldedThisResponse = new Set<string>();
     for (const [key, usage] of state.buc) {
       // Keys are `${businessObjectId}:${useCase}`; the bucket is per use case.
       const useCase = key.slice(key.lastIndexOf(':') + 1);
       const gate = this.bucGate(st, useCase);
       const worst = Math.max(usage.callCount, usage.totalCputime, usage.totalTime);
-      gate.worstPct = worst;
+      // Max within this response; a fresh reading from the next response still replaces
+      // it, so the figure decays with the account instead of ratcheting for ever.
+      gate.worstPct = foldedThisResponse.has(useCase) ? Math.max(gate.worstPct, worst) : worst;
+      foldedThisResponse.add(useCase);
 
       const etaMs = clampBackoff(Math.max(0, usage.estimatedTimeToRegainAccess) * ETA_MINUTES_TO_MS);
       let backoff = 0;
@@ -294,13 +303,18 @@ export class MetaScheduler {
       else if (etaMs > 0) backoff = etaMs;
 
       if (backoff > 0) {
-        gate.blockedUntil = Math.max(gate.blockedUntil, now + backoff);
-        gate.detail =
-          `BUC ${key} at ${worst}% (call_count ${usage.callCount}, total_cputime ${usage.totalCputime}, ` +
-          `total_time ${usage.totalTime})` +
-          (usage.estimatedTimeToRegainAccess > 0
-            ? `; Meta reports a cut-off of ${usage.estimatedTimeToRegainAccess} minutes`
-            : '');
+        const until = now + backoff;
+        // The reason must describe the bucket that owns the standing block. A milder
+        // entry arriving later must not relabel a longer block it did not cause.
+        if (until >= gate.blockedUntil) {
+          gate.blockedUntil = until;
+          gate.detail =
+            `BUC ${key} at ${worst}% (call_count ${usage.callCount}, total_cputime ${usage.totalCputime}, ` +
+            `total_time ${usage.totalTime})` +
+            (usage.estimatedTimeToRegainAccess > 0
+              ? `; Meta reports a cut-off of ${usage.estimatedTimeToRegainAccess} minutes`
+              : '');
+        }
       }
     }
 
@@ -336,7 +350,7 @@ export class MetaScheduler {
       this.notifyThrottle(err);
       throw err;
     }
-    st.tokens -= POINT_COST[req.lane];
+    st.tokens -= pointCost(req.lane);
   }
 
   /**
@@ -483,7 +497,7 @@ export class MetaScheduler {
       };
     }
 
-    const cost = POINT_COST[req.lane];
+    const cost = pointCost(req.lane);
     const reserve = req.lane === 'READ' ? st.capacity * this.writeReserveFraction : 0;
     if (st.capacity - reserve < cost) {
       // Refusing with a finite `retryAfterMs` here would be a lie: no amount of waiting
@@ -540,16 +554,51 @@ export class MetaScheduler {
   }
 
   private refill(st: AccountState, now: number): void {
-    const elapsed = Math.max(0, now - st.lastRefill);
+    // A cut-off account earns nothing back while it is blocked — and it must earn nothing
+    // back whether or not anybody LOOKED at it during the block. Deciding that by testing
+    // `pointsBlockedUntil > now` on the way past made the rule depend on observation
+    // frequency: a caller that slept the whole `retryAfterMs` and returned once arrived
+    // with a full 60-point bucket (twenty writes), while the same caller with a metrics
+    // scraper calling `snapshot()` every ten seconds arrived with nothing. Same clock,
+    // same headers, different publishing throughput, decided by a debug call.
+    //
+    // So accrue only from the later of "when we last refilled" and "when the cut-off
+    // ended". The blocked interval is then never credited, no matter which calls happened
+    // to straddle it.
+    const from = Math.max(st.lastRefill, st.pointsBlockedUntil);
     st.lastRefill = now;
+    const elapsed = Math.max(0, now - from);
     if (elapsed === 0) return;
-    if (st.pointsBlockedUntil > now) return; // a cut-off account earns nothing back
     st.tokens = Math.min(st.capacity, st.tokens + (elapsed * st.capacity) / POINT_DECAY_MS);
   }
 }
 
 function defaultUseCase(req: LaneRequest): BucUseCase {
   return req.useCase ?? (req.lane === 'WRITE' ? 'ads_management' : 'ads_insights');
+}
+
+/**
+ * The point cost of a lane, or a loud failure.
+ *
+ * A lane from outside the union — a JSON job record, a config file, an untyped caller,
+ * `'write'` instead of `'WRITE'` — makes `POINT_COST[lane]` `undefined`, and `undefined`
+ * LOSES EVERY COMPARISON in `evaluate`: `tokens - reserve < undefined` is false, so the
+ * call is allowed, and `tokens -= undefined` leaves the balance `NaN`. `NaN` then loses
+ * every comparison for ever after, so the limiter is silently and permanently off for
+ * that ad account — the same trap `validateProposal` refuses for budget values, and it
+ * belongs here too. A limiter that fails open is worse than no limiter, because nothing
+ * downstream knows to be careful.
+ */
+function pointCost(lane: Lane): number {
+  const cost: number | undefined = (POINT_COST as Record<string, number | undefined>)[lane];
+  if (cost === undefined) {
+    throw new Error(
+      `Unknown lane ${JSON.stringify(lane)}: expected 'READ' or 'WRITE'. An unknown lane has no ` +
+        `point cost, and an undefined cost would allow every call and leave the ad-account point ` +
+        `balance NaN — the limiter would be off, silently and permanently.`,
+    );
+  }
+  return cost;
 }
 
 /**
@@ -730,6 +779,12 @@ export class BudgetChangeQueue {
 
   /** One pending proposal per target — that is the coalescing rule, not an optimisation. */
   private readonly pending = new Map<string, PendingChange>();
+  /**
+   * When each pending proposal goes stale. Held separately from `PendingChange` because it
+   * is not a property of the proposal but of how long it has been given a real chance:
+   * `expire` pushes it out for as long as the target has no cap headroom.
+   */
+  private readonly staleAt = new Map<string, number>();
   /** Timestamps of changes counted against each target's cap window. */
   private readonly capWindow = new Map<string, number[]>();
   /** Applied ad-set budget writes, for the 24 h high-water mark. */
@@ -755,6 +810,7 @@ export class BudgetChangeQueue {
 
     if (!existing) {
       this.pending.set(key, incoming);
+      this.staleAt.set(key, now + this.staleAfterMs);
       return { status: 'QUEUED', pending: incoming };
     }
 
@@ -772,6 +828,7 @@ export class BudgetChangeQueue {
 
     incoming.supersededCount = existing.supersededCount + 1;
     this.pending.set(key, incoming);
+    this.staleAt.set(key, now + this.staleAfterMs);
     this.droppedSuperseded += 1;
     this.onDropped?.(existing, 'SUPERSEDED');
     return { status: 'SUPERSEDED', pending: incoming, dropped: existing };
@@ -803,6 +860,7 @@ export class BudgetChangeQueue {
     if (!best || bestKey === undefined) return undefined;
 
     this.pending.delete(bestKey);
+    this.staleAt.delete(bestKey);
     this.window(bestKey).push(now);
 
     this.leaseSeq += 1;
@@ -933,14 +991,36 @@ export class BudgetChangeQueue {
     };
   }
 
+  /**
+   * Drop proposals that have had a fair chance at a slot and not taken it.
+   *
+   * The subtlety is what "a fair chance" means. `staleAfterMs` defaults to the cap window,
+   * which is exactly the width of the stand-off a saturated target imposes — so measuring
+   * staleness from `proposedAt` alone makes the default pathological: a proposal queued
+   * `t` ms after its target saturates goes stale `t` ms after the slot reopens, and `t` is
+   * small in practice because the optimiser proposes the moment it sees the number move.
+   * Any polling interval wider than that sliver loses the change, and the change that is
+   * lost is the highest-value one, since that is the one the queue is holding. The whole
+   * point of the queue is to make the best budget edit land eventually.
+   *
+   * So the staleness clock does not run while the target is capped. Every sweep that finds
+   * a target with no headroom pushes that proposal's deadline out; once the target is
+   * genuinely eligible the deadline stands, and a proposal that then sits unclaimed for a
+   * full window really has failed to win a slot and is dropped on the numbers it deserves.
+   */
   private expire(now: number): void {
     if (!Number.isFinite(this.staleAfterMs)) return;
     for (const [key, change] of this.pending) {
-      if (now - change.proposedAt >= this.staleAfterMs) {
-        this.pending.delete(key);
-        this.droppedStale += 1;
-        this.onDropped?.(change, 'STALE');
+      if (this.remaining(change.kind, change.targetId, now) <= 0) {
+        this.staleAt.set(key, now + this.staleAfterMs);
+        continue;
       }
+      const deadline = this.staleAt.get(key) ?? change.proposedAt + this.staleAfterMs;
+      if (now < deadline) continue;
+      this.pending.delete(key);
+      this.staleAt.delete(key);
+      this.droppedStale += 1;
+      this.onDropped?.(change, 'STALE');
     }
   }
 

@@ -422,10 +422,56 @@ export function actionValue(row: InsightsRow, actionType: string, opts: ActionLo
     fail('window', deadWindowMessage(window));
   }
   const key = window ?? 'value';
-  for (const stat of statsFor(row, opts.field ?? 'actions')) {
-    if (stat.action_type === actionType) return parseNumeric(stat[key]);
+  const field = opts.field ?? 'actions';
+  const matches = actionStatSlices(row, actionType, { field });
+  const only = matches[0];
+  if (only === undefined) return undefined;
+  if (matches.length > 1) {
+    // One action_type appearing more than once means the response is SLICED by a
+    // non-default `action_breakdowns` (action_device, action_destination, ...). Returning
+    // the first entry would report one device's conversions as the whole ad's — a silent
+    // under-count of exactly the kind this module exists to refuse. Not summed here
+    // either: the right combination depends on the field (counts add, cost_per_* and
+    // *_roas need a weighted average), and only the caller knows which it asked for.
+    fail(
+      field,
+      `action_type "${actionType}" appears ${matches.length} times in ${field}, so the response is ` +
+        `sliced by action_breakdowns (${describeActionSlices(matches)}). Returning one slice would ` +
+        `report a fraction of the truth. Read the slices with actionStatSlices(row, "${actionType}", ` +
+        `{ field: "${field}" }) and combine them deliberately — counts add, cost_per_* and *_roas do not.`,
+    );
   }
-  return undefined;
+  return parseNumeric(only[key]);
+}
+
+/** Non-`action_type` breakdown keys an `action_breakdowns` request can add to each entry. */
+const ACTION_BREAKDOWN_KEYS: readonly string[] = [
+  'action_device', 'action_destination', 'action_target_id', 'action_reaction',
+  'action_video_type', 'action_video_sound', 'action_canvas_component_name',
+  'action_carousel_card_id', 'action_carousel_card_name',
+];
+
+/**
+ * Every entry of a `list<AdsActionStats>` field carrying this `action_type`.
+ *
+ * With the default `action_breakdowns=action_type` there is exactly one, and `actionValue`
+ * is what you want. Request any other action breakdown and Meta returns one entry PER
+ * SLICE — the sum over slices is the ad's total, and no single entry is.
+ */
+export function actionStatSlices(
+  row: InsightsRow,
+  actionType: string,
+  opts: { field?: string } = {},
+): readonly ActionStat[] {
+  return statsFor(row, opts.field ?? 'actions').filter((s) => s.action_type === actionType);
+}
+
+function describeActionSlices(matches: readonly ActionStat[]): string {
+  const keys = new Set<string>();
+  for (const m of matches) {
+    for (const k of ACTION_BREAKDOWN_KEYS) if (m[k] !== undefined) keys.add(k);
+  }
+  return keys.size > 0 ? `breakdown keys: ${[...keys].sort().join(', ')}` : 'no recognised action breakdown key present';
 }
 
 /** Attributed conversion VALUE (revenue) for one action type, from `action_values`. */
@@ -699,6 +745,15 @@ export function buildInsightsRequest(query: InsightsQuery, now: Date): BuiltRequ
   if (breakdowns.length > 0) params['breakdowns'] = breakdowns.join(',');
 
   if (query.actionBreakdowns && query.actionBreakdowns.length > 0) {
+    const sliced = query.actionBreakdowns.filter((b) => b !== 'action_type');
+    if (sliced.length > 0) {
+      warnings.push(
+        `action_breakdowns=${sliced.join(',')} makes Meta return one list<AdsActionStats> entry PER ` +
+          `SLICE, so a single action_type appears several times. actionValue() refuses that shape ` +
+          `rather than reporting one slice as the total — read actionStatSlices() and combine the ` +
+          `slices deliberately (counts add; cost_per_* and *_roas need a weighted average).`,
+      );
+    }
     params['action_breakdowns'] = query.actionBreakdowns.join(',');
   }
 
@@ -995,9 +1050,19 @@ export class InsightsClient {
     return { reportRunId: String(id), submittedAt };
   }
 
-  /** One poll of the AdReportRun node. */
+  /**
+   * One poll of the AdReportRun node.
+   *
+   * `fields` is requested explicitly rather than relying on the node's default field set:
+   * the default set is not documented anywhere, and a poll that comes back without
+   * `async_percent_completion` can never satisfy the two-condition completion test below.
+   */
   async pollReport(reportRunId: string): Promise<AsyncReportState> {
-    const res = await this.transport.get<Record<string, unknown>>(reportRunId, {}, {});
+    const res = await this.transport.get<Record<string, unknown>>(
+      reportRunId,
+      { fields: 'async_status,async_percent_completion' },
+      {},
+    );
     const status = res['async_status'];
     if (typeof status !== 'string') {
       throw new InsightsError(
@@ -1058,9 +1123,27 @@ export class InsightsClient {
         polls++;
 
         const state = await this.pollReport(submitted.reportRunId);
-        if (state.status === 'Job Completed' && state.percentComplete === 100) {
-          terminal = state;
-          break;
+        if (state.status === 'Job Completed') {
+          // Both conditions, per Meta's own instruction — `async_percent_completion` hits
+          // 100 while the status is still `Job Running`, and reading the results then
+          // returns a partial `data` array with no error.
+          if (state.percentComplete === 100) {
+            terminal = state;
+            break;
+          }
+          // ...but ABSENT is not the same as "below 100". A missing or non-numeric percent
+          // can never reach 100, so waiting on it is an unconditional hang that ends in a
+          // 75-minute timeout blaming the query's width. `Job Completed` is terminal in
+          // Meta's own state machine; accept it and say the percent was missing.
+          if (state.percentComplete === undefined) {
+            warnings.push(
+              `report ${submitted.reportRunId} returned "Job Completed" with no numeric ` +
+                `async_percent_completion; treating the status as terminal. Verify the row count — ` +
+                `results read before a job is genuinely finished come back partial with no error.`,
+            );
+            terminal = state;
+            break;
+          }
         }
         if (state.status === 'Job Failed' || state.status === 'Job Skipped') {
           terminal = state;

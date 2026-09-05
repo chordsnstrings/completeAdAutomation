@@ -494,6 +494,25 @@ export class SeedanceProvider implements VideoProvider {
       );
     }
 
+    // ModelArk has no negative-prompt field anywhere in the task API, and it silently
+    // ignores unknown top-level fields — so quietly dropping this would not fail, it
+    // would return a correctly-rendered, fully-billed video that ignored half the brief.
+    // Exactly the failure the last-frame gate above exists to prevent, so it is refused
+    // here rather than discovered on the invoice.
+    if (spec.negativePrompt !== undefined) {
+      throw new CapabilityError(
+        'seedance',
+        caps.modelId,
+        'negativePrompt',
+        `ModelArk has no negative-prompt field: the task API takes only the whitelisted top-level ` +
+          `fields plus content[] blocks, and unknown top-level fields are silently ignored. ` +
+          `Sending spec.negativePrompt would therefore not error — it would produce a ` +
+          `fully-billed video that ignored it. Fold the exclusion into the positive prompt (and ` +
+          `not as a legacy "--" flag, which is also swallowed), or route this brief to Veo, whose ` +
+          `parameters.negativePrompt is a real field.`,
+      );
+    }
+
     const content: Array<Record<string, unknown>> = [{ type: 'text', text: spec.prompt }];
     if (spec.firstFrame) {
       content.push({
@@ -524,7 +543,24 @@ export class SeedanceProvider implements VideoProvider {
       // flag that people reach for is silently ignored, so "off" must be a real field.
       watermark: false,
     };
-    if (spec.seed !== undefined) body['seed'] = spec.seed;
+    if (spec.seed !== undefined) {
+      // ModelArk types seed as an int and publishes no range. A fractional or negative
+      // value is certainly not one, and this API's habit is to swallow what it does not
+      // understand — which would silently cost the seed-pinned consistency that creative
+      // A/B comparison depends on. Veo checks its own uint32 range locally; this is the
+      // same guard, narrowed to what the vendor actually documents.
+      if (!Number.isInteger(spec.seed) || spec.seed < 0) {
+        throw new CapabilityError(
+          'seedance',
+          caps.modelId,
+          'seed',
+          `ModelArk seed must be a non-negative integer; got ${String(spec.seed)}. BytePlus ` +
+            `publishes no range, and this API silently ignores values it cannot use — a dropped ` +
+            `seed produces a billed clip that is simply not reproducible, with no error.`,
+        );
+      }
+      body['seed'] = spec.seed;
+    }
     if (spec.callbackUrl !== undefined) body['callback_url'] = spec.callbackUrl;
 
     const json = await this.request('POST', '/contents/generations/tasks', body, true);
