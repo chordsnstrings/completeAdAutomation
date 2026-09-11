@@ -4,9 +4,11 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=24.0.0"
   },
   "scripts": {
+    "start": "node dist/src/server/index.js",
+    "dev": "node --watch src/server/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "preflight": "node --experimental-strip-types src/cli.ts preflight",

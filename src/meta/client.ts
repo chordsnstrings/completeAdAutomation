@@ -41,6 +41,7 @@ export class SpendGuardError extends Error {
 /** Fields whose value would start or increase delivery. */
 const ACTIVATING_VALUES = new Set(['ACTIVE']);
 const STATUS_FIELDS = new Set(['status', 'configured_status', 'effective_status']);
+const DELIVERY_FIELDS = new Set(['daily_budget', 'lifetime_budget', 'bid_amount', 'spend_cap', 'end_time', 'start_time', 'budget_remaining']);
 
 export class MetaClient {
   readonly mode: RuntimeMode;
@@ -130,6 +131,16 @@ export class MetaClient {
   private assertWriteAllowed(path: string, params: Record<string, string>): void {
     if (this.mode === 'LIVE') return;
 
+    // Creation builders explicitly pause delivery. Edits to existing objects must
+    // never increase a running campaign's spending from STAGE/VALIDATE.
+    const creating = /(?:^|\/)(campaigns|adsets|ads)$/.test(path);
+    if (creating && params['status']?.toUpperCase() !== 'PAUSED') {
+      throw new SpendGuardError(`Creating delivery objects in ${this.mode} requires status=PAUSED.`);
+    }
+    if (!creating && Object.keys(params).some((key) => DELIVERY_FIELDS.has(key))) {
+      throw new SpendGuardError(`Delivery and budget edits on existing objects require LIVE mode.`);
+    }
+
     for (const field of STATUS_FIELDS) {
       const value = params[field];
       if (value !== undefined && ACTIVATING_VALUES.has(value.toUpperCase())) {
@@ -193,7 +204,12 @@ export class MetaClient {
  * so every numeric field wide enough to be an id is preserved as a string.
  */
 export function parseBigIntSafe(text: string): unknown {
-  return JSON.parse(text.replace(/:\s*(\d{16,})(?=\s*[,}\]])/g, ': "$1"'));
+  // Tokenize strings first: digits inside copy or error messages must remain text.
+  // Arrays and negative IDs are handled too; decimals/exponents remain numbers.
+  return JSON.parse(text.replace(/"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g, (token) => {
+    if (token.startsWith('"') || /[.eE]/.test(token)) return token;
+    return /^-?\d{16,}$/.test(token) && !Number.isSafeInteger(Number(token)) ? JSON.stringify(token) : token;
+  }));
 }
 
 function stripLeadingSlash(p: string): string {

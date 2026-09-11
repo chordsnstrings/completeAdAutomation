@@ -49,11 +49,11 @@ interface DebugTokenData {
  * token can always self-inspect unproofed, so this read-only call is what turns an
  * opaque failure into "your secret is for app X, your token is from app Y".
  */
-async function inspectTokenUnproofed(token: string): Promise<DebugTokenData> {
+async function inspectTokenUnproofed(token: string,fetchImpl:typeof fetch=fetch): Promise<DebugTokenData> {
   const url = new URL(`${GRAPH_BASE_URL}/debug_token`);
   url.searchParams.set('input_token', token);
   url.searchParams.set('access_token', token);
-  const res = await fetch(url);
+  const res = await fetchImpl(url);
   const body = (await res.json()) as { data?: DebugTokenData; error?: { message: string } };
   if (body.error) throw new Error(body.error.message);
   return body.data ?? {};
@@ -73,12 +73,13 @@ export async function checkToken(
   client: MetaClient,
   appId: string,
   token: string,
+  fetchImpl:typeof fetch=fetch,
 ): Promise<{ results: CheckResult[]; ok: boolean; systemUserId?: string }> {
   const results: CheckResult[] = [];
   let data: DebugTokenData;
 
   try {
-    data = await inspectTokenUnproofed(token);
+    data = await inspectTokenUnproofed(token,fetchImpl);
   } catch (e) {
     return {
       ok: false,

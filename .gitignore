@@ -12,3 +12,8 @@ venv/
 tmp/
 out/
 renders/
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.key
