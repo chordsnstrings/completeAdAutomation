@@ -12,6 +12,11 @@ const docker = (...args) =>
 let base;
 let cookie = "";
 let csrf = "";
+function containerAddress() {
+  const port = docker("port", name, "3000/tcp").trim().split(":").at(-1);
+  assert.match(port ?? "", /^\d+$/);
+  return `http://127.0.0.1:${port}`;
+}
 async function request(path, method = "GET", data) {
   return fetch(`${base}${path}`, {
     method,
@@ -50,8 +55,7 @@ try {
     `${name}:/app/data`,
     image,
   );
-  const port = docker("port", name, "3000/tcp").trim().split(":").at(-1);
-  base = `http://127.0.0.1:${port}`;
+  base = containerAddress();
   await ready();
   assert.equal((await request("/api/bootstrap")).status, 401);
   const page = await request("/");
@@ -136,6 +140,8 @@ try {
   assert.ok(probe.streams.some((s) => s.codec_name === "h264"));
   assert.ok(probe.streams.some((s) => s.codec_name === "aac"));
   docker("restart", "--time", "30", name);
+  // Docker can allocate a different ephemeral host port when the container starts again.
+  base = containerAddress();
   await ready();
   const after = await request("/api/bootstrap");
   assert.equal(after.status, 200, "owner session survives a restart");

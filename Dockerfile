@@ -20,4 +20,4 @@ ENV HOST=0.0.0.0 PORT=3000 DATA_DIR=/app/data NODE_ENV=production
 EXPOSE 3000
 VOLUME /app/data
 HEALTHCHECK --interval=30s --timeout=5s CMD node -e "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-CMD ["npm","start"]
+CMD ["node","dist/src/server/index.js"]
