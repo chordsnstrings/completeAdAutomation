@@ -1,11 +1,12 @@
 import { createSign, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { SeedanceProvider } from "../generation/seedance.ts";
 import { VeoProvider } from "../generation/veo.ts";
-import type { VideoProvider, GenerationSpec } from "../generation/provider.ts";
+import { ProviderRequestError } from "../generation/provider.ts";
+import type { VideoProvider, GenerationSpec, ImageRef } from "../generation/provider.ts";
 import { TEMPLATE_SPECS, validateGenome } from "../domain/genome.ts";
 import type { CreativeGenome, CreativeTemplate } from "../domain/genome.ts";
 import { screenCreative } from "../policy/screen.ts";
@@ -29,7 +30,7 @@ import type { FfmpegTools, CutName } from "../assembly/ffmpeg.ts";
 import { runQaGates } from "../assembly/qa.ts";
 import type { Store } from "./store.ts";
 import type { Vault } from "./security.ts";
-import { DEFAULT_SETTINGS, AppError, nowIso } from "./types.ts";
+import { DEFAULT_SETTINGS, AppError, TransientAppError, nowIso } from "./types.ts";
 import type {
   Settings,
   ManagedBrand,
@@ -91,15 +92,18 @@ export class Production {
   readonly store: Store;
   readonly vault: Vault;
   readonly fetchImpl: typeof fetch;
+  readonly assetImpl: typeof publicBytes;
   private google: { token: string; expires: number } | undefined;
   constructor(
     store: Store,
     vault: Vault,
     fetchImpl: typeof fetch = timedFetch,
+    assetImpl: typeof publicBytes = publicBytes,
   ) {
     this.store = store;
     this.vault = vault;
     this.fetchImpl = fetchImpl;
+    this.assetImpl = assetImpl;
   }
   settings(): Settings {
     return this.store.setting("app", DEFAULT_SETTINGS);
@@ -254,7 +258,8 @@ export class Production {
       reserve,
       brand.generationDailyUsd,
     );
-    this.store.startEffect(key);
+    if (!this.store.startEffect(key))
+      throw new AppError("This text request is already reserved or completed. Its outcome must be reconciled before another submission.");
     const res = await this.fetchImpl("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
@@ -272,8 +277,10 @@ export class Production {
       status?: string;
     };
     if (!res.ok) {
-      if (res.status < 500)
+      if (res.status < 500 && res.status !== 408)
         this.store.failEffect(key, data.error?.message ?? `HTTP ${res.status}`);
+      if (res.status === 429)
+        throw new TransientAppError("The text service is rate limited. Waiting before retrying.");
       throw new AppError(
         data.error?.message ?? `Creative service returned HTTP ${res.status}.`,
       );
@@ -541,6 +548,7 @@ export class Production {
     simulation = false,
   ): Promise<void> {
     const provider = simulation ? undefined : this.provider(c.provider);
+    let reference: ImageRef | undefined;
     for (let i = 0; i < c.shots.length; i++) {
       this.assertAllowed(brand, c.runId);
       const shot = c.shots[i]!;
@@ -563,6 +571,16 @@ export class Production {
         throw new AppError(
           "A video submission has an uncertain outcome. It has not been resubmitted or charged twice. Check the provider task history.",
         );
+      if (brand.productImage && !reference) {
+        const asset = await this.assetImpl(brand.productImage, 10 * 1024 * 1024);
+        const png = asset.bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+        const jpeg = asset.bytes[0] === 0xff && asset.bytes[1] === 0xd8 && asset.bytes[2] === 0xff;
+        if (!png && !jpeg) throw new AppError("The product reference must contain a valid PNG or JPEG image.");
+        const mimeType = png ? "image/png" as const : "image/jpeg" as const;
+        reference = c.provider === "veo"
+          ? { kind: "base64", data: asset.bytes.toString("base64"), mimeType }
+          : { kind: "uri", uri: brand.productImage, mimeType };
+      }
       const spec: GenerationSpec = {
         modelId: c.model,
         prompt: `${shot.prompt}\nBrand facts: ${brand.proposition}. No people, faces, logos belonging to others, captions, text, or speech. Use the product reference faithfully. Vertical composition with the product inside the central 60%.`,
@@ -570,15 +588,7 @@ export class Production {
         aspectRatio: "9:16",
         resolution: "720p",
         audio: false,
-        ...(brand.productImage
-          ? {
-              firstFrame: {
-                kind: "uri" as const,
-                uri: brand.productImage,
-                mimeType: "image/jpeg" as const,
-              },
-            }
-          : {}),
+        ...(reference ? { firstFrame: reference } : {}),
       };
       const estimate = provider!.estimateCost(spec);
       const day = new Date().toLocaleDateString("en-CA", {
@@ -591,8 +601,16 @@ export class Production {
         estimate.microUnits,
         brand.generationDailyUsd,
       );
-      this.store.startEffect(key);
-      const task = await provider!.submit(spec);
+      if (!this.store.startEffect(key))
+        throw new AppError("This video request already has a recorded outcome. Reconcile it before another submission.");
+      let task;
+      try {
+        task = await provider!.submit(spec);
+      } catch (error) {
+        if (error instanceof ProviderRequestError && error.httpStatus >= 400 && error.httpStatus < 500 && error.httpStatus !== 408)
+          this.store.failEffect(key, error.message);
+        throw error;
+      }
       this.store.finishEffect(key, task.taskId);
       shot.taskId = task.taskId;
       shot.submittedAt = nowIso();
@@ -651,7 +669,7 @@ export class Production {
         }
         writeFileSync(
           shot.file,
-          (await publicBytes(uri, 100 * 1024 * 1024, headers)).bytes,
+          (await this.assetImpl(uri, 100 * 1024 * 1024, headers)).bytes,
           { mode: 0o600 },
         );
       } else throw new AppError("The provider returned no downloadable video.");
@@ -694,7 +712,8 @@ export class Production {
       Math.ceil(c.voiceover.length * 15),
       brand.generationDailyUsd,
     );
-    this.store.startEffect(key);
+    if (!this.store.startEffect(key))
+      throw new AppError("Narration already has a recorded request. Restore its output or start a new production attempt.");
     const res = await this.fetchImpl("https://api.openai.com/v1/audio/speech", {
       method: "POST",
       headers: {
@@ -708,11 +727,18 @@ export class Production {
         response_format: "mp3",
       }),
     });
-    if (!res.ok) throw new AppError(`Narration failed (HTTP ${res.status}).`);
+    if (!res.ok) {
+      if (res.status < 500 && res.status !== 408)
+        this.store.failEffect(key, `Narration failed (HTTP ${res.status}).`);
+      if (res.status === 429)
+        throw new TransientAppError("Narration is rate limited. Waiting before retrying.");
+      throw new AppError(`Narration failed (HTTP ${res.status}).`);
+    }
     const bytes = Buffer.from(await res.arrayBuffer());
     if (bytes.length > 20 * 1024 * 1024)
       throw new AppError("Narration exceeded the size limit.");
-    writeFileSync(path, bytes, { mode: 0o600 });
+    writeFileSync(`${path}.pending`, bytes, { mode: 0o600 });
+    renameSync(`${path}.pending`, path);
     this.store.finishEffect(key, true);
   }
   async render(
@@ -964,7 +990,7 @@ export class Production {
     const image = `data:image/jpeg;base64,${readFileSync(join(this.store.dir, "media", c.id, "contact.jpg")).toString("base64")}`;
     const images = [image];
     if (brand.productImage) {
-      const ref = await publicBytes(brand.productImage, 5 * 1024 * 1024);
+      const ref = await this.assetImpl(brand.productImage, 5 * 1024 * 1024);
       if (!/^image\/(jpeg|png|webp)/.test(ref.contentType))
         throw new AppError("The product reference must be an image.");
       images.push(

@@ -81,6 +81,21 @@ Actual eligibility, reviews, permissions, and destination behavior are enforced 
 
 Set a conversion bearer token and CRM signing secret under Connections. See [the integration contract](docs/APP-INTEGRATIONS.md) for request examples, identifier hashing, stable event IDs, signature verification, and delivery semantics. Lead exports and reporting exports are authenticated CSV downloads. Treat the persistent volume and its backups as sensitive business data.
 
+## Workflow regression coverage
+
+`npm run test:workflows` runs the 45 combinations of five funnels and nine goals through injected live-mode provider contracts, plus performance changes, activation recovery, spending stops, currencies, and Seed & Harvest audience maturation. `npm test` includes these tests and the authenticated conversion/CRM integration suite.
+
+The browser rehearsal uses `test/support/browser-server.ts` only with the explicit `SC_ENABLE_QA=1` opt-in. It creates a disposable SQLite workspace, intercepts external transports, and rejects unexpected requests. Production startup never imports it. Browser screenshots and the separate real FFmpeg assembly check are evidence of local behavior; they do not establish paid-provider access or real Meta delivery.
+
+Recent recovery behavior:
+
+- Incomplete activation is paused across every stage, and unsuccessful pauses remain durable priority work.
+- Definitively rejected provider requests may retry; unknown outcomes remain reserved without another paid submission. A retry on another day must fit that day's production allowance.
+- A mature, fully learned slate with zero primary results after at least ten target CPAs of settled spend per ad pauses for tracking and offer review.
+- Seed & Harvest evaluates audience maturity after 30 days and adds eligible per-country conversion lookalikes as suggestions. Small audiences stop the seed; 100 observed purchases can end it early; 45 days is the final stop.
+- A brand with real campaign or reporting history keeps its original ad account and currency. Use a separate brand for a different account or currency.
+- Legacy COP, CRC, HUF, IDR and TWD configurations require an explicit budget review before live checks proceed. Saving reviewed values records the shared currency-unit convention.
+
 ## Verify
 
 ```bash

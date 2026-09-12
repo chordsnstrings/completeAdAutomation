@@ -9,6 +9,7 @@ import type {
 import type { AccountContext } from "../meta/publish.ts";
 
 export interface ManagedBrand extends Brand {
+  currencyUnitVersion?: 1;
   currency: string;
   timezone: string;
   funnel: FunnelTemplateId | "auto";
@@ -126,6 +127,7 @@ export interface CampaignRun {
   };
 }
 export interface PublishedStage {
+  activationPending?: boolean;
   stageId: string;
   campaignId: string;
   adSetId: string;
@@ -266,3 +268,10 @@ export class AppError extends Error {
   }
 }
 export const nowIso = (): string => new Date().toISOString();
+export class TransientAppError extends AppError {
+  readonly retryAfterMs: number;
+  constructor(message: string, retryAfterMs = 60000) {
+    super(message, 429);
+    this.retryAfterMs = retryAfterMs;
+  }
+}

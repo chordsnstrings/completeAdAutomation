@@ -205,6 +205,7 @@ export function validateManagedBrand(
     countries,
     proposition: string(o["proposition"], "What you sell", 4000, true),
     currency,
+    currencyUnitVersion: 1,
     timezone,
     funnel: funnel as ManagedBrand["funnel"],
     assets: assets as ManagedBrand["assets"],

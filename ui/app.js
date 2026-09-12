@@ -116,6 +116,18 @@ const funnelDescriptions = {
   value_ladder:
     "Find high-value customers, then support repeat purchases with a small, dedicated retention campaign.",
 };
+const stageDescriptions = {
+  engine: "Concentrate your budget in one campaign so each creative has enough delivery to learn.",
+  seed: "Build initial video engagement. The seed stops once enough purchases arrive, when the audience is too small after 30 days, or at the 45-day limit.",
+  harvest: "Find customers with a conversion campaign. Once eligible, a conversion lookalike becomes an audience suggestion in the existing ad set.",
+  prospecting: "Introduce the brand to new customers with a clear opening message.",
+  recapture: "Address questions and objections from people who have already engaged with the brand.",
+  tof: "Introduce the brand to a broader audience with a dedicated reach campaign.",
+  mof: "Develop interest with deeper product stories and warm audience suggestions.",
+  bof: "Help interested website visitors and cart starters complete their purchase.",
+  value_prospecting: "Find more customers like your highest-value buyers using a value-based lookalike.",
+  existing_customer: "Encourage repeat purchases with a modest budget for existing customers.",
+};
 const nav = [
   ["overview", "Overview"],
   ["brands", "Brands"],
@@ -130,10 +142,13 @@ const currentPage = () =>
     ? location.hash.slice(1)
     : "overview";
 const brandBy = (id) => state.data.brands.find((b) => b.id === id);
-const offset = (currency) =>
-  10 **
-  new Intl.NumberFormat("en", { style: "currency", currency }).resolvedOptions()
-    .maximumFractionDigits;
+const offset = (currency) => {
+  const rules = state.data?.currencyRules;
+  if (!rules) throw new Error("Currency rules are unavailable. Refresh the page before entering budgets.");
+  if (!/^[A-Z]{3}$/.test(currency) || rules.unsupported.includes(currency))
+    throw new Error("This currency is not supported for automated budgets.");
+  return rules.wholeUnits.includes(currency) ? 1 : 100;
+};
 const money = (minor, currency = state.currency) =>
   currency
     ? new Intl.NumberFormat("en", {
@@ -245,8 +260,10 @@ function render() {
     state.currency = currencies[0] ?? "";
   if (state.brand && !brandBy(state.brand)) state.brand = "";
   const paused = d.settings.globalPaused;
+  const expandedRuns = new Set([...app.querySelectorAll("[data-run-detail][open]")].map(el => el.dataset.runDetail));
   document.title = `${nav.find((n) => n[0] === page)[1]} · Spend Control`;
-  app.innerHTML = `<div class="shell"><aside class="sidebar"><a class="logo" href="#overview"><img src="/mark.svg" alt="">Spend Control</a><div class="workspace"><div class="workspace-icon">${icon("brands", 15)}</div><div><strong>Your workspace</strong><span>Meta advertising</span></div></div><div class="eyebrow nav-label">Workspace</div><nav class="nav" aria-label="Main navigation">${nav.map(([id, label]) => `<a href="#${id}" class="${page === id ? "active" : ""}" ${page === id ? 'aria-current="page"' : ""}>${icon(id)}${label}${id === "campaigns" && d.runs.filter((r) => r.status === "blocked").length ? `<span class="count">${d.runs.filter((r) => r.status === "blocked").length}</span>` : ""}</a>`).join("")}</nav><div class="sidebar-bottom"><div class="sync-status"><span class="dot ${paused || !state.online ? "paused" : ""}"></span>${!state.online ? "Connection interrupted" : paused ? "Workspace paused" : d.worker.enabled ? "Worker connected" : "Worker stopped"}</div><div class="account"><div class="avatar">SC</div><div><strong class="small">Workspace owner</strong><p class="muted small">Administrator</p></div><button class="icon-btn" data-action="password" aria-label="Account settings">${icon("key", 16)}</button></div></div></aside><div class="main-wrap"><div class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="menu" aria-label="Toggle navigation" aria-expanded="false">${icon("menu")}</button><span>Workspace</span><span>/</span><strong>${nav.find((n) => n[0] === page)[1]}</strong></div><div class="top-actions"><select aria-label="Filter by brand" id="brand-filter"><option value="">All brands</option>${d.brands.map((b) => `<option value="${esc(b.id)}" ${state.brand === b.id ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select><span class="divider"></span><button class="icon-btn" data-action="refresh" aria-label="Refresh workspace">${icon("refresh", 16)}</button>${btn(paused ? "Resume workspace" : "Pause all", paused ? "resume-all" : "pause-all", "", paused ? "soft" : "", "" + (paused ? "play" : "pause"))}</div></div><main id="main" tabindex="-1">${paused ? `<div class="notice warn">${icon("pause")}<span>${d.settings.emergencyPending ? "Pause requests are still being retried with Meta. Delivery may continue until Meta confirms them." : "The workspace is paused. Resume it and enable a brand to continue autonomous work."}</span></div>` : ""}${!state.online ? `<div class="notice error">${icon("info")}Connection interrupted. Showing the last received data.</div>` : ""}${{ overview, brands, campaigns, funnels, creatives, learning, connections }[page]()}<footer class="footer-note"><span>${icon("shield", 12)} Yours to direct. Built to work quietly.</span><span>Spend Control · Meta workspace</span></footer></main></div></div>`;
+  app.innerHTML = `<div class="shell"><aside class="sidebar"><a class="logo" href="#overview"><img src="/mark.svg" alt="">Spend Control</a><div class="workspace"><div class="workspace-icon">${icon("brands", 15)}</div><div><strong>Your workspace</strong><span>Meta advertising</span></div></div><div class="eyebrow nav-label">Workspace</div><nav class="nav" aria-label="Main navigation">${nav.map(([id, label]) => `<a href="#${id}" class="${page === id ? "active" : ""}" ${page === id ? 'aria-current="page"' : ""}>${icon(id)}${label}${id === "campaigns" && d.runs.filter((r) => r.status === "blocked").length ? `<span class="count">${d.runs.filter((r) => r.status === "blocked").length}</span>` : ""}</a>`).join("")}</nav><div class="sidebar-bottom"><div class="sync-status"><span class="dot ${paused || !state.online || !d.worker.enabled ? "paused" : ""}"></span>${!state.online ? "Connection interrupted" : paused ? "Workspace paused" : d.worker.enabled ? "Worker connected" : "Worker stopped"}</div><div class="account"><div class="avatar">SC</div><div><strong class="small">Workspace owner</strong><p class="muted small">Administrator</p></div><button class="icon-btn" data-action="password" aria-label="Account settings">${icon("key", 16)}</button></div></div></aside><div class="main-wrap"><div class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="menu" aria-label="Toggle navigation" aria-expanded="false">${icon("menu")}</button><span>Workspace</span><span>/</span><strong>${nav.find((n) => n[0] === page)[1]}</strong></div><div class="top-actions"><select aria-label="Filter by brand" id="brand-filter"><option value="">All brands</option>${d.brands.map((b) => `<option value="${esc(b.id)}" ${state.brand === b.id ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select><span class="divider"></span><button class="icon-btn" data-action="refresh" aria-label="Refresh workspace">${icon("refresh", 16)}</button>${btn(paused ? "Resume workspace" : "Pause all", paused ? "resume-all" : "pause-all", "", paused ? "soft" : "", "" + (paused ? "play" : "pause"))}</div></div><main id="main" tabindex="-1">${paused ? `<div class="notice warn">${icon("pause")}<span>${d.settings.emergencyPending ? "Pause requests are still being retried with Meta. Delivery may continue until Meta confirms them." : "The workspace is paused. Resume it and enable a brand to continue autonomous work."}</span></div>` : ""}${!state.online ? `<div class="notice error">${icon("info")}Connection interrupted. Showing the last received data.</div>` : ""}${{ overview, brands, campaigns, funnels, creatives, learning, connections }[page]()}<footer class="footer-note"><span>${icon("shield", 12)} Yours to direct. Built to work quietly.</span><span>Spend Control · Meta workspace</span></footer></main></div></div>`;
+  app.querySelectorAll("[data-run-detail]").forEach(el => { el.open = expandedRuns.has(el.dataset.runDetail); });
   $(".sidebar").inert = window.innerWidth <= 760;
   if (
     page === "funnels" &&
@@ -349,10 +366,16 @@ function activityRows(items) {
         .join("")
     : '<p class="muted small">Activity will appear here as your workspace starts working.</p>';
 }
+function displayedDailyBudget(b) {
+  const stages = state.data.runs.filter(r => r.brandId === b.id && r.mode === b.mode)
+    .flatMap(r => r.stages).filter(s => s.active || s.activationPending);
+  return { minor: stages.length ? stages.reduce((sum, s) => sum + s.dailyBudgetMinor, 0) : b.spend.dailyBudgetMinor,
+    label: stages.length ? "Active daily budget" : "Starting daily budget" };
+}
 function brandTable() {
   const rows = selectedBrands();
   return rows.length
-    ? `<div class="table-wrap"><table><thead><tr><th>Brand</th><th>Mode</th><th>Daily budget</th><th>Funnel</th><th>Autonomy</th><th></th></tr></thead><tbody>${rows.map((b) => `<tr><td><div class="cell-brand">${symbol(b)}<div><strong>${esc(b.name)}</strong><span class="sub">${esc(goalNames[b.archetype])}</span></div></div></td><td>${modeBadge(b.mode)}</td><td>${esc(money(b.spend.dailyBudgetMinor, b.currency))}<span class="sub">${esc(money(b.spend.maxDailyBudgetMinor, b.currency))} ceiling</span></td><td>${esc(b.funnel === "auto" ? "Recommended" : state.data.funnels[b.funnel]?.name)}</td><td>${badge(b.autonomy ? "Enabled" : "Paused", b.autonomy ? "green" : "")}</td><td>${btn("Manage", "edit-brand", b.id, "tiny", "arrow")}</td></tr>`).join("")}</tbody></table></div>`
+    ? `<div class="table-wrap"><table><thead><tr><th>Brand</th><th>Mode</th><th>Daily budget</th><th>Funnel</th><th>Autonomy</th><th></th></tr></thead><tbody>${rows.map((b) => `<tr><td><div class="cell-brand">${symbol(b)}<div><strong>${esc(b.name)}</strong><span class="sub">${esc(goalNames[b.archetype])}</span></div></div></td><td>${modeBadge(b.mode)}</td><td>${esc(money(displayedDailyBudget(b).minor, b.currency))}<span class="sub">${displayedDailyBudget(b).label} · ${esc(money(b.spend.maxDailyBudgetMinor, b.currency))} ceiling</span></td><td>${esc(b.funnel === "auto" ? "Recommended" : state.data.funnels[b.funnel]?.name)}</td><td>${badge(b.autonomy ? "Enabled" : "Paused", b.autonomy ? "green" : "")}</td><td>${btn("Manage", "edit-brand", b.id, "tiny", "arrow")}</td></tr>`).join("")}</tbody></table></div>`
     : empty(
         "A home for every brand.",
         "Add a brand to start planning its next campaign.",
@@ -372,7 +395,7 @@ function brands() {
       : `<div class="brand-grid">${selectedBrands()
           .map(
             (b) =>
-              `<article class="panel brand-card"><div class="brand-card-head">${symbol(b)}${modeBadge(b.mode)}</div><h3>${esc(b.name)}</h3><p>${esc(goalNames[b.archetype])}</p><p class="brand-summary">${esc(b.proposition)}</p><div class="brand-budget"><div><strong>${esc(money(b.spend.dailyBudgetMinor, b.currency))}</strong><span>Daily advertising budget</span></div><div><strong>${esc(money(b.spend.targetCpaMinor, b.currency))}</strong><span>Target cost per result</span></div></div>${badge(b.autonomy ? "Autonomy enabled" : "Autonomy paused", b.autonomy ? "green" : "")}${b.preflight.some((c) => c.severity === "BLOCK") ? " " + badge("Check connection", "red") : ""}<p class="small muted">Production today: $${(state.data.productionSpend[b.id] ?? 0).toFixed(2)} / $${b.generationDailyUsd}</p><div class="heading-actions">${btn("Edit", "edit-brand", b.id, "tiny", "edit")}${btn("Check", "check-brand", b.id, "tiny", "shield")}${btn(b.autonomy ? "Pause" : "Enable", "toggle-brand", b.id, b.autonomy ? "tiny" : "tiny soft", b.autonomy ? "pause" : "play")}${btn("Run", "run", b.id, "tiny", "arrow")}</div></article>`,
+              `<article class="panel brand-card"><div class="brand-card-head">${symbol(b)}${modeBadge(b.mode)}</div><h3>${esc(b.name)}</h3><p>${esc(goalNames[b.archetype])}</p><p class="brand-summary">${esc(b.proposition)}</p><div class="brand-budget"><div><strong>${esc(money(displayedDailyBudget(b).minor, b.currency))}</strong><span>${displayedDailyBudget(b).label}</span></div><div><strong>${esc(money(b.spend.targetCpaMinor, b.currency))}</strong><span>Target cost per result</span></div></div>${badge(b.autonomy ? "Autonomy enabled" : "Autonomy paused", b.autonomy ? "green" : "")}${b.preflight.some((c) => c.severity === "BLOCK") ? " " + badge("Check connection", "red") : ""}<p class="small muted">Production today: $${(state.data.productionSpend[b.id] ?? 0).toFixed(2)} / $${b.generationDailyUsd}</p><div class="heading-actions">${btn("Edit", "edit-brand", b.id, "tiny", "edit")}${btn("Check", "check-brand", b.id, "tiny", "shield")}${btn(b.autonomy ? "Pause" : "Enable", "toggle-brand", b.id, b.autonomy ? "tiny" : "tiny soft", b.autonomy ? "pause" : "play")}${btn("Run", "run", b.id, "tiny", "arrow")}</div></article>`,
           )
           .join("")}</div>`)
   );
@@ -431,7 +454,7 @@ function campaigns() {
           .map((r) => {
             const b = brandBy(r.brandId),
               index = r.phase === "complete" ? 9 : phaseIds.indexOf(r.phase);
-            return `<article class="panel run-card"><div class="run-top"><div class="run-title">${symbol(b)}<div><h3>${esc(b?.name ?? r.brandId)} <span class="muted small">/ ${esc(r.id.slice(0, 8))}</span></h3><p>${esc(r.plan?.template?.name ?? "Planning campaign")} · ${time(r.createdAt)} · ${r.creativeIds.length} creatives</p></div></div><div>${modeBadge(r.mode)} ${statusBadge(r.status)}</div></div><div class="pipeline" aria-label="Campaign progress">${phaseLabels.map((label, i) => `<div class="pipeline-step ${i < index ? "done" : i === index ? (r.status === "blocked" ? "failed" : "current") : ""}"><div class="track"></div><span>${label}</span></div>`).join("")}</div>${r.error ? `<div class="notice error">${icon("info")}<span>${esc(r.error)}</span></div>` : ""}<div class="run-bottom"><span>${r.mode === "SIMULATE" ? "No real spend" : `Video production estimate: $${r.generationCostUsd.toFixed(2)}`} · ${r.stages.length} stages ${r.nextAt ? `· Next step ${time(r.nextAt)}` : ""}</span><div class="heading-actions">${r.status === "blocked" ? btn("Retry step", "retry-run", r.id, "tiny soft", "refresh") : ""}${r.status !== "cancelled" ? btn("Pause brand", "pause-run", r.id, "tiny", "pause") : ""}</div></div>${r.stages.length || r.warnings.length ? `<details class="run-detail"><summary>Campaign details & checks</summary>${r.warnings.length ? `<ul>${r.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}${r.stages.map((s) => `<p>${esc(human(s.stageId))} · ${esc(money(s.dailyBudgetMinor, b.currency))}/day · ${s.active ? "Active" : "Paused"} · ${esc(human(s.primaryAction))}</p>`).join("")}</details>` : ""}</article>`;
+            return `<article class="panel run-card"><div class="run-top"><div class="run-title">${symbol(b)}<div><h3>${esc(b?.name ?? r.brandId)} <span class="muted small">/ ${esc(r.id.slice(0, 8))}</span></h3><p>${esc(r.plan?.template?.name ?? "Planning campaign")} · ${time(r.createdAt)} · ${r.creativeIds.length} creatives</p></div></div><div>${modeBadge(r.mode)} ${statusBadge(r.status)}</div></div><div class="pipeline" aria-label="Campaign progress">${phaseLabels.map((label, i) => `<div class="pipeline-step ${i < index ? "done" : i === index ? (r.status === "blocked" ? "failed" : "current") : ""}"><div class="track"></div><span>${label}</span></div>`).join("")}</div>${r.error ? `<div class="notice error">${icon("info")}<span>${esc(r.error)}</span></div>` : ""}<div class="run-bottom"><span>${r.mode === "SIMULATE" ? "No real spend" : `Video production estimate: $${r.generationCostUsd.toFixed(2)}`} · ${r.stages.length} ${r.stages.length === 1 ? "stage" : "stages"} ${r.nextAt ? `· Next step ${time(r.nextAt)}` : ""}</span><div class="heading-actions">${r.status === "blocked" ? btn("Retry step", "retry-run", r.id, "tiny soft", "refresh") : ""}${r.status !== "cancelled" ? btn("Pause brand", "pause-run", r.id, "tiny", "pause") : ""}</div></div>${r.stages.length || r.warnings.length ? `<details class="run-detail" data-run-detail="${esc(r.id)}"><summary>Campaign details & checks</summary>${r.warnings.length ? `<ul>${r.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}${r.stages.map((s) => `<p>${esc(human(s.stageId))} · ${esc(money(s.dailyBudgetMinor, b.currency))}/day · ${s.active ? "Active" : "Paused"} · ${esc(human(s.primaryAction.replace(/^offsite_conversion\.(fb_pixel_)?/, "").replace(/^onsite_conversion\./, "")))}</p>`).join("")}</details>` : ""}</article>`;
           })
           .join("")
       : empty(
@@ -522,6 +545,17 @@ function creatives() {
         ))
   );
 }
+function decisionSummary(d) {
+  if (d.action === "BUDGET" && d.valueMinor != null)
+    return `${d.applied ? "Daily budget updated to" : "Daily budget proposed at"} ${money(d.valueMinor, brandBy(d.brandId)?.currency)}.`;
+  if (d.action === "HOLD" && /LEARNING/.test(d.reason)) return "Learning is still in progress. Keep delivery steady while results settle.";
+  if (/ROAS/.test(d.reason) && /hold|below|not met/i.test(d.reason)) return "Return on ad spend does not yet support a budget increase.";
+  if (d.action === "KILL") return "The settled evidence supports pausing this creative and keeping the stronger alternative.";
+  if (d.action === "SCALE") return d.applied ? "The stronger creative qualified for a measured budget increase." : "A stronger creative was identified. The spending gates determine whether its budget can change.";
+  if (d.action === "EQUIVALENT") return "These creatives perform similarly. Keep collecting results.";
+  return d.reason;
+}
+const decisionLabels = { KILL: "Pause creative", BUDGET: "Budget", SCALE: "Scale", HOLD: "Hold", PAUSE: "Pause brand", EQUIVALENT: "Similar results", ITERATE: "New direction" };
 function learning() {
   const decisions = filterItems(state.data.decisions);
   return (
@@ -530,7 +564,7 @@ function learning() {
       "See what the system learns, changes, and leaves to gather more evidence.",
       `<a class="btn" href="/api/export?kind=metrics${state.brand ? `&brand=${encodeURIComponent(state.brand)}` : ""}">${icon("down", 15)}Export reporting</a>`,
     ) +
-    `<div class="learning-layout"><section class="panel"><div class="panel-head"><div><h2>Optimization decisions</h2><p>Mature evidence, measured changes.</p></div>${icon("learning")}</div>${decisions.length ? decisions.map((d) => `<article class="learning-row"><header><strong class="small">${esc(brandBy(d.brandId)?.name)}</strong>${badge(human(d.action), d.action === "SCALE" ? "green" : d.action === "KILL" ? "red" : "blue")}</header><p>${esc(d.reason)}</p><small>${time(d.createdAt)} · ${d.simulation ? "Illustrative simulation" : d.applied ? "Applied to Meta" : "Observed · no change applied"} · ${esc(d.adId.slice(-10))}</small></article>`).join("") : empty("Learning needs a little time.", "Decisions appear after reporting provides enough settled evidence.", "", "learning")}</section><section class="panel"><div class="panel-head"><div><h2>Workspace activity</h2><p>A record of the work behind the scenes.</p></div>${icon("clock")}</div><div class="panel-body">${activityRows(state.data.activity.filter((x) => !state.brand || x.brandId === state.brand || !x.brandId))}</div></section></div>`
+    `<div class="learning-layout"><section class="panel"><div class="panel-head"><div><h2>Optimization decisions</h2><p>Mature evidence, measured changes.</p></div>${icon("learning")}</div>${decisions.length ? decisions.map((d) => `<article class="learning-row"><header><strong class="small">${esc(brandBy(d.brandId)?.name)}</strong>${badge(decisionLabels[d.action] ?? human(d.action), d.action === "SCALE" ? "green" : d.action === "KILL" ? "red" : "blue")}</header><p>${esc(decisionSummary(d))}</p>${decisionSummary(d) !== d.reason ? `<details class="decision-evidence" data-run-detail="decision:${esc(d.id)}"><summary>Decision evidence</summary><p>${esc(d.reason)}</p></details>` : ""}<small>${time(d.createdAt)} · ${d.simulation ? "Illustrative simulation" : d.applied ? "Applied to Meta" : "Observed · no change applied"} · ${esc(d.adId.slice(-10))}</small></article>`).join("") : empty("Learning needs a little time.", "Decisions appear after reporting provides enough settled evidence.", "", "learning")}</section><section class="panel"><div class="panel-head"><div><h2>Workspace activity</h2><p>A record of the work behind the scenes.</p></div>${icon("clock")}</div><div class="panel-body">${activityRows(state.data.activity.filter((x) => !state.brand || x.brandId === state.brand || !x.brandId))}</div></section></div>`
   );
 }
 function field(name, label, value = "", opts = {}) {
@@ -664,7 +698,7 @@ function creativeDetail(id) {
   modal(
     "A closer look.",
     brandBy(c.brandId)?.name,
-    `<div class="creative-detail"><div>${c.media ? `<video controls playsinline preload="metadata" poster="${esc(c.thumbnail)}" src="${esc(c.media)}"></video>` : `<div class="empty">${icon("creatives", 40)}<p>Video is still in production.</p></div>`}${c.variants.length ? `<div class="heading-actions mt">${c.variants.map((v) => `<a class="btn tiny" href="/api/media/${c.id}/${v.replace(":", "x")}.mp4" download>${icon("down", 12)}${esc(v)}</a>`).join("")}</div>` : ""}</div><div>${statusBadge(c.status)}<h3 class="mt">${esc(c.headline)}</h3><p>${esc(c.copy)}</p><div class="eyebrow mt">Narration</div><p>${esc(c.voiceover)}</p><div class="eyebrow mt">Creative genome</div>${Object.entries(
+    `<div class="creative-detail"><div>${c.media ? `<video controls playsinline preload="metadata" poster="${esc(c.thumbnail)}" src="${esc(c.media)}"></video>` : `<div class="empty">${icon("creatives", 40)}<p>Video is still in production.</p></div>`}${c.variants.length ? `<div class="heading-actions mt">${c.variants.map((v) => `<a class="btn tiny" href="/api/media/${c.id}/${v.replace(":", "x")}.mp4" download>${icon("down", 12)}${esc(v)}</a>`).join("")}</div>` : ""}</div><div>${statusBadge(c.status)}<h3 class="mt">${esc(c.headline)}</h3><p>${esc(c.copy)}</p><div class="eyebrow mt">Narration</div><p>${esc(c.voiceover)}</p><div class="eyebrow mt">Creative direction</div>${Object.entries(
       c.genome,
     )
       .filter(([k]) => k !== "angleId")
@@ -684,7 +718,7 @@ function funnelDetail(id) {
   modal(
     f.name,
     "A closer look at the audience, budget, and role of each stage.",
-    `<p class="small muted">${esc(funnelDescriptions[id])}</p><div class="table-wrap mt"><table class="funnel-details-table"><thead><tr><th>Stage</th><th>Budget</th><th>Objective</th><th>Audience</th></tr></thead><tbody>${f.stages.map((s, i) => `<tr><td><strong>${esc(s.label)}</strong></td><td>${p && b ? esc(money(p.stages[i].dailyBudgetMinor, b.currency)) : `${Math.round(s.budgetShare * 100)}%`}</td><td>${esc(human(p?.stages[i]?.arithmetic?.rung ?? s.fixedRung ?? "Brand conversion"))}</td><td>${s.target.length ? s.target.map((t) => esc(state.data.audiences[t]?.label)).join(", ") : "Broad · Advantage+ audience"}</td></tr>`).join("")}</tbody></table></div>${p?.refusal ? `<div class="notice warn mt">${icon("info")}<span>${esc(p.refusal)}</span></div>` : ""}${f.stages.map((s) => `<div class="mt"><h3 class="small">${esc(s.label)}</h3><p class="small muted">${esc(s.purpose)}</p></div>`).join("")}<div class="form-footer">${btn("Close", "close")}${b && !p?.refusal ? btn("Use this funnel", "select-funnel", id, "primary", "check") : !b ? btn("Add a brand", "new-brand", "", "primary", "plus") : ""}</div>`,
+    `<p class="small muted">${esc(funnelDescriptions[id])}</p><div class="table-wrap mt"><table class="funnel-details-table"><thead><tr><th>Stage</th><th>Budget</th><th>Objective</th><th>Audience</th></tr></thead><tbody>${f.stages.map((s, i) => `<tr><td><strong>${esc(s.label)}</strong></td><td>${p && b ? esc(money(p.stages[i].dailyBudgetMinor, b.currency)) : `${Math.round(s.budgetShare * 100)}%`}</td><td>${esc(human(p?.stages[i]?.arithmetic?.rung ?? s.fixedRung ?? "Brand conversion"))}</td><td>${s.target.length ? s.target.map((t) => esc(state.data.audiences[t]?.label)).join(", ") : s.suggest?.length ? `Broad · suggested: ${s.suggest.map((t) => esc(state.data.audiences[t]?.label)).join(", ")}` : "Broad · Advantage+ audience"}</td></tr>`).join("")}</tbody></table></div>${p?.refusal ? `<div class="notice warn mt">${icon("info")}<span>${esc(p.refusal)}</span></div>` : ""}${f.stages.map((s) => `<div class="mt"><h3 class="small">${esc(s.label)}</h3><p class="small muted">${esc(stageDescriptions[s.id] ?? s.purpose)}</p></div>`).join("")}<div class="form-footer">${btn("Close", "close")}${b && !p?.refusal ? btn("Use this funnel", "select-funnel", id, "primary", "check") : !b ? btn("Add a brand", "new-brand", "", "primary", "plus") : ""}</div>`,
   );
 }
 async function refresh(show = false) {
@@ -774,7 +808,7 @@ async function action(name, id, el) {
   }
   if (name === "run") {
     const b = brandBy(id);
-    if (b.mode === "LIVE" && !b.autonomy) {
+    if (b.mode === "STAGE" || (b.mode === "LIVE" && !b.autonomy)) {
       launchDialog(id);
       return;
     }
@@ -949,6 +983,13 @@ document.addEventListener("change", (e) => {
     state.funnelBrand = e.target.value;
     state.plans = null;
     render();
+  }
+  if (e.target.name === "archetype" && e.target.form?.dataset.form === "brand") {
+    const event = e.target.form.elements.customEventType;
+    if (event && ["", "PURCHASE", "LEAD"].includes(event.value)) {
+      if (e.target.value === "website_lead") event.value = "LEAD";
+      if (e.target.value === "website_purchase") event.value = "PURCHASE";
+    }
   }
   if (e.target.name === "provider") {
     const form = e.target.form;

@@ -37,7 +37,7 @@ import { allPlans, planFor } from "./planner.ts";
 import { conversionPayload } from "./webhooks.ts";
 import { FUNNEL_TEMPLATES, AUDIENCE_POOLS } from "../funnel/templates.ts";
 import { ARCHETYPES } from "../meta/objectives.ts";
-import { currencyOffset } from "../meta/publish.ts";
+import { currencyOffset, ZERO_DECIMAL_CURRENCIES, AMBIGUOUS_MINOR_UNIT_CURRENCIES } from "../meta/publish.ts";
 import { timedFetch } from "./network.ts";
 
 export interface AppOptions {
@@ -160,6 +160,10 @@ export function createApp(options: AppOptions) {
       funnels: FUNNEL_TEMPLATES,
       goals: ARCHETYPES,
       audiences: AUDIENCE_POOLS,
+      currencyRules: {
+        wholeUnits: [...ZERO_DECIMAL_CURRENCIES],
+        unsupported: [...AMBIGUOUS_MINOR_UNIT_CURRENCIES],
+      },
       leadCount: store.count("leads"),
       productionSpend: Object.fromEntries(
         brands.map((b) => [
@@ -187,7 +191,7 @@ export function createApp(options: AppOptions) {
       .list<CampaignRun>("runs", id)
       .some(
         (r) =>
-          r.stages.some((s) => s.active) ||
+          r.stages.some((s) => s.active || s.activationPending) ||
           ["queued", "running", "waiting"].includes(r.status),
       );
   }
@@ -379,7 +383,8 @@ export function createApp(options: AppOptions) {
           }
         }
         if (vault.get("openaiKey")) {
-          const r = await timedFetch(
+          try {
+          const r = await engine.production.fetchImpl(
             `https://api.openai.com/v1/models/${encodeURIComponent(engine.settings().textModel)}`,
             { headers: { authorization: `Bearer ${vault.get("openaiKey")}` } },
           );
@@ -390,6 +395,9 @@ export function createApp(options: AppOptions) {
               ? "Model access confirmed."
               : `Model check returned HTTP ${r.status}.`,
           });
+          } catch (error) {
+            checks.push({ name: "OpenAI", severity: "BLOCK", detail: vault.redact(String(error)) });
+          }
         }
         checks.push({
           name: "Video generation",
@@ -466,6 +474,10 @@ export function createApp(options: AppOptions) {
               409,
             );
           const next = validateManagedBrand(await body(req), brand);
+          if ((next.adAccountId !== brand.adAccountId || next.currency !== brand.currency) &&
+              (store.list<CampaignRun>("runs", brand.id).some(r => r.mode !== "SIMULATE" && r.stages.length > 0) ||
+               store.list<Metric>("metrics", brand.id).some(m => !m.simulation)))
+            throw new AppError("This brand has real campaign history. Create a separate brand for another ad account or currency so reporting and spend limits stay accurate.", 409);
           next.autonomy = false;
           store.put("brands", next);
           store.event(brand.id, "info", "Brand updated", next.name);

@@ -212,7 +212,7 @@ export class Store {
   startEffect(key: string): boolean {
     return (
       this.db
-        .prepare(`INSERT OR IGNORE INTO effects VALUES(?,'pending','null',?)`)
+        .prepare(`INSERT INTO effects VALUES(?,'pending','null',?) ON CONFLICT(key) DO UPDATE SET state='pending',value='null',updated_at=excluded.updated_at WHERE effects.state='failed'`)
         .run(key, nowIso()).changes === 1
     );
   }
@@ -243,9 +243,12 @@ export class Store {
     limitUsd: number,
   ): void {
     this.transaction(() => {
-      if (this.db.prepare("SELECT key FROM charges WHERE key=?").get(key))
-        return;
-      const used = this.spent(brandId, day);
+      const prior = this.db.prepare("SELECT day,micros FROM charges WHERE key=?").get(key);
+      if (prior && this.effect(key)?.state !== "failed") return;
+      // A definitively rejected attempt may be retried on another account day.
+      // Rebook its reservation against today's allowance before making that request.
+      const used = this.spent(brandId, day) -
+        (prior?.["day"] === day ? Number(prior["micros"]) : 0);
       if (
         !Number.isSafeInteger(micros) ||
         micros < 0 ||
@@ -255,7 +258,7 @@ export class Store {
           "The daily production allowance is exhausted. The job will wait until tomorrow.",
         );
       this.db
-        .prepare("INSERT INTO charges VALUES(?,?,?,?)")
+        .prepare("INSERT INTO charges VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET day=excluded.day,micros=excluded.micros")
         .run(key, brandId, day, micros);
     });
   }

@@ -8,11 +8,12 @@
   },
   "scripts": {
     "start": "node dist/src/server/index.js",
-    "dev": "node --watch src/server/index.ts",
+    "dev": "node scripts/dev.mjs",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "preflight": "node --experimental-strip-types src/cli.ts preflight",
     "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test:workflows": "node --experimental-strip-types --test test/workflows.test.ts",
     "brands": "node --experimental-strip-types src/cli.ts brands"
   },
   "devDependencies": {

@@ -93,6 +93,8 @@ export class MetaGateway {
     return { accounts, pages };
   }
   async check(brand: ManagedBrand): Promise<Check[]> {
+    if (brand.currencyUnitVersion !== 1 && ["COP", "CRC", "HUF", "IDR", "TWD"].includes(brand.currency))
+      return [{ name: "Budget units", severity: "BLOCK", detail: "Currency handling has been corrected. Review and save this brand’s daily, maximum, lifetime and target-cost budgets before continuing." }];
     if (brand.mode === "SIMULATE") {
       brand.account = {
         adAccountId: brand.adAccountId,
@@ -280,7 +282,8 @@ export class MetaGateway {
           params["status"] === "ACTIVE" ||
           (!/\/(campaigns|adsets)$/.test(path) &&
             (params["daily_budget"] !== undefined ||
-              params["lifetime_budget"] !== undefined));
+              params["lifetime_budget"] !== undefined ||
+              params["targeting"] !== undefined));
         if (delivery) {
           const current = this.store.get<ManagedBrand>("brands", brand.id);
           if (

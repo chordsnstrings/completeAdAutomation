@@ -2,6 +2,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { MetaApiError } from "../meta/errors.ts";
 import { RateLimited } from "../meta/scheduler.ts";
+import { ProviderRequestError } from "../generation/provider.ts";
 import { VideoUploader } from "../meta/videoUpload.ts";
 import {
   buildCampaignRequest,
@@ -38,8 +39,9 @@ import { Store } from "./store.ts";
 import { Vault } from "./security.ts";
 import { MetaGateway } from "./meta.ts";
 import { Production } from "./production.ts";
+import type { publicBytes } from "./network.ts";
 import { planFor } from "./planner.ts";
-import { AppError, DEFAULT_SETTINGS, nowIso } from "./types.ts";
+import { AppError, TransientAppError, DEFAULT_SETTINGS, nowIso } from "./types.ts";
 import type {
   ManagedBrand,
   CampaignRun,
@@ -78,12 +80,14 @@ export interface EngineOptions {
   fetchImpl?: typeof fetch;
   production?: Production;
   meta?: MetaGateway;
+  webhookTransport?: typeof publicBytes;
 }
 export class Engine {
   readonly store: Store;
   readonly vault: Vault;
   readonly meta: MetaGateway;
   readonly production: Production;
+  private readonly webhookTransport: typeof publicBytes | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private busy = false;
   private stopped = false;
@@ -91,6 +95,7 @@ export class Engine {
   constructor(store: Store, vault: Vault, options: EngineOptions = {}) {
     this.store = store;
     this.vault = vault;
+    this.webhookTransport = options.webhookTransport;
     this.meta =
       options.meta ?? new MetaGateway(store, vault, options.fetchImpl);
     this.production =
@@ -268,6 +273,8 @@ export class Engine {
         }
         const transient =
           e instanceof RateLimited ||
+          e instanceof TransientAppError ||
+          (e instanceof ProviderRequestError && e.httpStatus === 429) ||
           (e instanceof MetaApiError && e.retryable) ||
           /fetch failed|timed out|ECONNRESET|ETIMEDOUT/.test(message);
         const allowance = message.includes("daily production allowance");
@@ -275,7 +282,7 @@ export class Engine {
           ? Date.now() + 86400000
           : transient && job.attempt <= 8
             ? Date.now() +
-              (e instanceof RateLimited
+              (e instanceof RateLimited || e instanceof TransientAppError
                 ? e.retryAfterMs
                 : Math.min(30 * 60000, 10000 * 2 ** job.attempt))
             : job.kind === "monitor" ||
@@ -288,7 +295,7 @@ export class Engine {
         this.store.finish(job, due, message);
         if (job.kind === "run") {
           const run = this.store.get<CampaignRun>("runs", job.entityId);
-          if (run) {
+          if (run && run.status !== "cancelled") {
             run.status = due ? "waiting" : "blocked";
             run.error = message;
             run.updatedAt = nowIso();
@@ -743,6 +750,11 @@ export class Engine {
       );
     }
     const id = brand.audienceIds[pool.id];
+    if (pool.id === "lookalike_campaign_conversions_3pct" && id && brand.mode !== "SIMULATE") {
+      const group = this.store.setting<Record<string, string>>(`seed-lookalikes:${brand.id}:${brand.adAccountId}`, {});
+      const ids = Object.values(group);
+      if (ids[0] === id) return ids;
+    }
     if (pool.kind === "video" && id && brand.mode !== "SIMULATE") {
       const state = this.store.setting<VideoAudienceState | null>(
         this.videoAudienceKey(brand, pool),
@@ -1012,25 +1024,52 @@ export class Engine {
           "This brand has reached its lifetime spending limit.",
         );
     }
-    for (const stage of run.stages) {
-      if (stage.active) continue;
-      for (const adId of stage.adIds)
-        await this.meta.status(adId, "ACTIVE", brand, run.mode);
-      await this.meta.status(stage.adSetId, "ACTIVE", brand, run.mode);
-      await this.meta.status(stage.campaignId, "ACTIVE", brand, run.mode);
-      stage.active = true;
-      this.store.put("runs", run);
+    try {
+      for (const stage of run.stages) {
+        if (stage.active && !stage.activationPending) continue;
+        // Persist intent BEFORE the first write, including ambiguous/crashed activations.
+        stage.activationPending = true;
+        this.store.put("runs", run);
+        for (const adId of stage.adIds)
+          await this.meta.status(adId, "ACTIVE", brand, run.mode);
+        await this.meta.status(stage.adSetId, "ACTIVE", brand, run.mode);
+        await this.meta.status(stage.campaignId, "ACTIVE", brand, run.mode);
+        stage.active = true;
+        stage.activationPending = false;
+        this.store.put("runs", run);
+      }
+    } catch (error) {
+      try {
+        await this.pauseRun(run.id);
+      } catch (pauseError) {
+        // Pause retries take priority over all production and monitoring work.
+        const current = this.brand(brand.id);
+        current.autonomy = false;
+        this.store.put("brands", current);
+        this.store.enqueue("pause", brand.id);
+        this.store.event(brand.id, "error", "Launch recovery awaiting Meta", this.vault.redact(String(pauseError)));
+      }
+      throw error;
     }
   }
   async pauseRun(id: string): Promise<void> {
     const run = this.store.get<CampaignRun>("runs", id);
     if (!run) throw new AppError("Campaign not found.", 404);
     const brand = this.brand(run.brandId);
+    let error: unknown;
     for (const stage of run.stages) {
-      await this.meta.status(stage.campaignId, "PAUSED", brand, run.mode);
-      stage.active = false;
-      this.store.put("runs", run);
+      try {
+        await this.meta.status(stage.campaignId, "PAUSED", brand, run.mode);
+        stage.active = false;
+        stage.activationPending = false;
+        this.store.put("runs", run);
+      } catch (e) {
+        stage.activationPending = true;
+        this.store.put("runs", run);
+        error = e;
+      }
     }
+    if (error) throw error;
     this.store.event(brand.id, "info", "Campaign paused", run.id.slice(0, 8));
   }
   async pauseBrand(id: string): Promise<void> {
@@ -1091,8 +1130,9 @@ export class Engine {
     if (!brand.autonomy) return;
     const runs = this.store
       .list<CampaignRun>("runs", id)
-      .filter((r) => r.status === "complete" && r.mode === brand.mode);
-    const active = runs.filter((r) => r.stages.some((s) => s.active));
+      .filter((r) => r.mode === brand.mode && r.stages.length > 0);
+    // Incomplete or recovered runs can already be spending on Meta.
+    const active = runs.filter((r) => r.stages.some((s) => s.active || s.activationPending));
     if (!active.length) {
       if (
         !this.store
@@ -1107,6 +1147,19 @@ export class Engine {
     if (brand.mode === "SIMULATE") {
       this.simulatedMetrics(brand, active);
       return;
+    }
+    for (const run of active) {
+      if (run.status !== "complete" || run.stages.some((s) => s.activationPending)) {
+        try {
+          await this.pauseRun(run.id);
+          Object.assign(run, this.store.get<CampaignRun>("runs", run.id));
+        } catch (error) {
+          brand.autonomy = false;
+          this.store.put("brands", brand);
+          this.store.enqueue("pause", brand.id);
+          throw error;
+        }
+      }
     }
     const client = new InsightsClient({
       transport: {
@@ -1180,7 +1233,17 @@ export class Engine {
       );
     }
     if (!(await this.reconcileDelivery(brand, active))) return;
-    for (const run of active) await this.optimize(brand, run, metrics, asOf);
+    // Optional audience enrichment must never delay spend controls or optimization.
+    for (const run of active) {
+      if (run.status !== "complete") continue;
+      try {
+        await this.syncSeedLookalike(brand, run, metrics);
+      } catch (error) {
+        this.store.event(id, "warning", "Seed audience awaiting Meta", this.vault.redact(String(error)));
+      }
+    }
+    for (const run of active)
+      if (run.status === "complete") await this.optimize(brand, run, metrics, asOf);
     // Refresh only after mature evidence requests iteration; time alone is not fatigue.
     this.store.event(
       id,
@@ -1188,6 +1251,73 @@ export class Engine {
       "Performance updated",
       `${rows.length} reporting rows synchronized. Decisions use settled evidence and the current account status.`,
     );
+  }
+  async syncSeedLookalike(brand: ManagedBrand, run: CampaignRun, metrics: Metric[]): Promise<void> {
+    if (brand.mode !== "LIVE" || run.plan?.templateId !== "seed_and_harvest") return;
+    const seed = run.stages.find((s) => s.stageId === "seed");
+    const harvest = run.stages.find((s) => s.stageId === "harvest");
+    if (!seed || !harvest?.active) return;
+    const age = (Date.now() - Date.parse(run.createdAt)) / 86400000;
+    const purchases = harvest.primaryAction === actionFor("website_purchase", "", "PURCHASE")
+      ? metrics.filter((m) => m.runId === run.id && harvest.adIds.includes(m.adId)).reduce((n, m) => n + m.conversions, 0)
+      : 0;
+    if (purchases >= 100 && seed.active) {
+      await this.meta.status(seed.campaignId, "PAUSED", brand);
+      seed.active = false;
+      this.store.put("runs", run);
+      this.store.event(brand.id, "success", "Seed stage completed", "The harvest stage has at least 100 reported purchases. Video seeding has stopped.");
+    }
+    if (age < 30) return;
+    const key = "lookalike_campaign_conversions_3pct";
+    if (!brand.audienceIds[key]) {
+      const counts: number[] = [];
+      for (const id of this.poolIds(brand, AUDIENCE_POOLS.video_75_90d)) {
+        const node = await this.meta.get<{ approximate_count_lower_bound?: number }>(id, { fields: "approximate_count_lower_bound" }, brand.adAccountId);
+        if (typeof node.approximate_count_lower_bound === "number" && node.approximate_count_lower_bound >= 0)
+          counts.push(node.approximate_count_lower_bound);
+      }
+      // People may overlap across video chunks; do not sum and invent unique people.
+      const lowerBound = counts.length ? Math.max(...counts) : undefined;
+      if (lowerBound === undefined) return;
+      if (lowerBound < 1000) {
+        if (seed.active) {
+          await this.meta.status(seed.campaignId, "PAUSED", brand);
+          seed.active = false;
+          this.store.put("runs", run);
+          this.store.event(brand.id, "warning", "Seed stage stopped", "After 30 days the verified warm-audience lower bound is below 1,000. The harvest campaign continues independently.");
+        }
+        return;
+      }
+      const groupKey = `seed-lookalikes:${brand.id}:${brand.adAccountId}`;
+      const group = this.store.setting<Record<string, string>>(groupKey, {});
+      for (const country of brand.countries) {
+        if (group[country]) continue;
+        group[country] = await this.meta.create(`${brand.adAccountId}/customaudiences`, {
+          name: `${brand.name} · Seed lookalike · ${country}`,
+          subtype: "LOOKALIKE",
+          lookalike_spec: JSON.stringify({ conversion_type: "campaign_conversions", origin_ids: seed.campaignId, country, ratio: 0.03 }),
+        }, `seed-lookalike:${seed.campaignId}:${country}`, brand, "STAGE");
+        this.store.setSetting(groupKey, group);
+      }
+      brand.audienceIds[key] = Object.values(group)[0]!;
+      this.saveAudiences(brand);
+    }
+    const ids = this.poolIds(brand, AUDIENCE_POOLS[key]);
+    for (const id of ids) {
+      const node = await this.meta.get(id, { fields: AUDIENCE_READ_FIELDS }, brand.adAccountId);
+      const readiness = classifyAudienceReadiness(asStatusNode(node, id));
+      if (readiness.verdict === "wait") return;
+      if (readiness.verdict === "fail") throw new AppError(readiness.reason);
+    }
+    const remote = await this.meta.get<{ targeting?: Record<string, unknown> }>(harvest.adSetId, { fields: "targeting" }, brand.adAccountId);
+    if (!remote.targeting) throw new AppError("Meta did not return current harvest targeting. Audience changes are held.");
+    const existing = Array.isArray(remote.targeting["custom_audiences"])
+      ? remote.targeting["custom_audiences"] as Array<{ id: string }>
+      : [];
+    const additions = ids.filter((id) => !existing.some((item) => item.id === id));
+    if (!additions.length) return;
+    await this.meta.post(harvest.adSetId, { targeting: JSON.stringify({ ...remote.targeting, custom_audiences: [...existing, ...additions.map((id) => ({ id }))] }) }, brand, "LIVE");
+    this.store.event(brand.id, "success", "Harvest audience enriched", "The ready seed lookalike is now a suggestion in the existing harvest ad set. Current geographic and exclusion settings were preserved.");
   }
   async optimize(
     brand: ManagedBrand,
@@ -1305,6 +1435,21 @@ export class Engine {
             actionFor(brand.archetype, "", brand.destination.customEventType))
       )
         continue;
+      const matureZeroResult = ads.filter((ad) => ad.effectiveStatus === "ACTIVE");
+      if (matureZeroResult.length && learning === "SUCCESS" && matureZeroResult.every((ad) => {
+        const settled = ad.rows.filter((row) => Date.parse(asOf) - Date.parse(row.statDate) >= click * 86400000);
+        return ad.ageDays >= click && ad.daysSinceSignificantEdit >= click && ad.impressions >= 2000 &&
+          settled.reduce((n, row) => n + row.spendMinor, 0) >= 10 * brand.spend.targetCpaMinor! &&
+          settled.reduce((n, row) => n + row.conversions, 0) === 0;
+      })) {
+        // Relative comparison alone cannot reject a slate whose ads all return zero.
+        // This is a spending stop, not a claim that a particular creative caused it.
+        await this.pauseBrand(brand.id);
+        this.store.put("decisions", { id: `zero-result:${run.id}:${stage.stageId}:${asOf}`, brandId: brand.id,
+          runId: run.id, adId: stage.adSetId, action: "PAUSE", applied: true, simulation: false, createdAt: nowIso(),
+          reason: "Every active ad has spent at least 10 times the target cost with zero settled results, after learning and attribution windows. Delivery paused for a conversion-tracking and offer review." });
+        return;
+      }
       const result = decideSlate({
         asOfDate: asOf,
         targetCpaMinor: brand.spend.targetCpaMinor!,
@@ -1387,7 +1532,13 @@ export class Engine {
     let total = 0;
     for (const run of runs)
       for (const stage of run.stages) {
-        if (!stage.active) continue;
+        if (!stage.active && !stage.activationPending) continue;
+        if (stage.activationPending || run.status !== "complete") {
+          // Fail closed after a crash or a launch that never reached completion.
+          await this.pauseRun(run.id);
+          this.store.event(brand.id, "warning", "Incomplete launch recovered", "Campaign delivery was paused before production can resume.");
+          continue;
+        }
         const campaign = await this.meta.get<{
           status?: string;
           daily_budget?: string;
@@ -1779,6 +1930,7 @@ export class Engine {
       brand.leadWebhookUrl,
       lead,
       this.vault.get("leadWebhookSecret"),
+      this.webhookTransport,
     );
     lead.delivery = "delivered";
     lead.deliveredAt = nowIso();

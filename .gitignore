@@ -17,3 +17,4 @@ data/
 *.sqlite-shm
 *.sqlite-wal
 *.key
+test/.browser-*
