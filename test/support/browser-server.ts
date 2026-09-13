@@ -8,7 +8,7 @@ import type { AddressInfo } from "node:net";
 import { createApp } from "../../src/app/server.ts";
 import { setupToken } from "../../src/app/security.ts";
 import { Engine } from "../../src/app/engine.ts";
-import type { CampaignRun, ManagedBrand, Settings } from "../../src/app/types.ts";
+import type { CampaignRun, ManagedBrand, Settings, Creative } from "../../src/app/types.ts";
 import { DEFAULT_SETTINGS } from "../../src/app/types.ts";
 import { MockServices, MockMeta, MockProduction, fixture, finish } from "./mock-workspace.ts";
 import { EngagementServices } from "./engagement-services.ts";
@@ -70,6 +70,7 @@ async function command(input:Record<string,unknown>) {
     await command({action:"setup"});await command({action:"brand",brand:{mode:"LIVE",instagramUserId:"777777"}});
     const preparedBrand=app.engine.brand("nord");await api("/api/brands/nord/autonomy","POST",{enabled:true,dailyBudgetMinor:preparedBrand.spend.dailyBudgetMinor,maxDailyBudgetMinor:preparedBrand.spend.maxDailyBudgetMinor});
     const run=await api("/api/brands/nord/run","POST",{});await finish(app.engine,String(run.id));
+    for (const c of app.store.list<Creative>("creatives")) await app.engine.production.voice(app.engine.brand(c.brandId),c,join(app.store.dir,`narration-${c.id}.mp3`),false);
     await command({action:"performance",kind:"mixed"});await command({action:"facebook"});
     app.engine.engagement.save("nord",{mode:"auto",dailyLimit:50,rules:[{label:"Care",questions:["How do I clean it?"],reply:"Clean it gently by hand with a soft cloth."}],aiEnabled:true,provider:"glm",model:"glm-5.2",aiDailyLimit:100,knowledgeUrls:[]});
     await app.engine.engagement.discover("nord");
@@ -83,7 +84,7 @@ async function command(input:Record<string,unknown>) {
   }
   if(action==="setup"){
     await api("/api/setup","POST",{token:setupToken(app.store),password});
-    for(const name of ["metaToken","metaAppId","metaAppSecret","openaiKey","seedanceKey"] as const)app.vault.set(name,"test-only-not-a-real-credential");
+    for(const name of ["metaToken","metaAppId","metaAppSecret","openaiKey","seedanceKey","minimaxKey"] as const)app.vault.set(name,"test-only-not-a-real-credential");
     console.log(JSON.stringify({action,ok:true}));return;
   }
   if(action==="login"){await api("/api/login","POST",{password});console.log(JSON.stringify({action,ok:true}));return;}

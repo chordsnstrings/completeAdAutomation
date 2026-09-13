@@ -46,10 +46,12 @@ export interface Check {
   remedy?: string;
 }
 export interface Settings {
-  provider: "seedance" | "veo";
+  provider: "seedance" | "veo" | "minimax";
   textModel: string;
   textInputUsdPerMillion: number;
   textOutputUsdPerMillion: number;
+  textCachedUsdPerMillion?: number;
+  h3UsdPerSecond?: number;
   videoModel: string;
   googleProject: string;
   googleBucket: string;
@@ -59,11 +61,13 @@ export interface Settings {
   emergencyPending: boolean;
 }
 export const DEFAULT_SETTINGS: Settings = {
-  provider: "seedance",
+  provider: "minimax",
   textModel: "gpt-4.1-mini",
   textInputUsdPerMillion: 0.4,
   textOutputUsdPerMillion: 1.6,
-  videoModel: "seedance-1-5-pro-251215",
+  textCachedUsdPerMillion: 0.1,
+  h3UsdPerSecond: 0.08,
+  videoModel: "MiniMax-H3",
   googleProject: "",
   googleBucket: "",
   googleRegion: "us-central1",
@@ -166,7 +170,7 @@ export interface Creative {
     | "published";
   taskId: string;
   taskSubmittedAt: string;
-  provider: "seedance" | "veo";
+  provider: "seedance" | "veo" | "minimax";
   model: string;
   generationEstimateUsd: number;
   outputUri: string;

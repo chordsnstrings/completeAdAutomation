@@ -7,6 +7,7 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { Store } from "./store.ts";
+import { UsageLedger, defaultChatRates, chatRate, tokenRate } from "./usage.ts";
 import {
   Vault,
   digest,
@@ -369,6 +370,49 @@ export function createApp(options: AppOptions) {
     }
     if (path.startsWith("/api/")) {
       const s = auth(req, !["GET", "HEAD"].includes(method));
+      if (path === "/api/usage" && method === "GET") {
+        json(res, new UsageLedger(store).query(url.searchParams)); return;
+      }
+      if (path === "/api/usage/pricing" && method === "GET") {
+        const rates = Object.entries(defaultChatRates()).map(([key]) => {
+          const [provider, model] = key.split(":") as [string, string];
+          return { key, provider, model, rate: chatRate(store, provider, model) };
+        });
+        json(res, { rates }); return;
+      }
+      if (path === "/api/usage/pricing" && method === "POST") {
+        const o = object(await body(req)), key = string(o["key"], "Model", 100, true);
+        if (!Object.hasOwn(defaultChatRates(), key)) throw new AppError("Choose a supported engagement model.");
+        const [provider, model] = key.split(":") as [string, string], old = chatRate(store, provider, model);
+        const rate = { ...old, ...tokenRate(old.input!, old.output!, old.cached, "Workspace rate override"), verifiedAt: nowIso().slice(0, 10) };
+        for (const field of ["input", "output", "cached"] as const) {
+          const v = o[field];
+          if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 1000) throw new AppError("Rates must be USD per million tokens between 0 and 1000.");
+          rate[field] = v;
+        }
+        if (old.longContext) {
+          const long = object(o["longContext"]);
+          rate.longContext = { ...old.longContext };
+          for (const field of ["input", "output", "cached"] as const) {
+            const v = long[field]; if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 1000) throw new AppError("Set all three long-context rates for MiniMax M3.");
+            rate.longContext[field] = v;
+          }
+        }
+        store.setSetting("chatRates", { ...store.setting("chatRates", {}), [key]: rate });
+        store.event("", "info", "AI model rate updated", `${model}: new requests use the updated rate. Historical receipts retain their original rate.`);
+        json(res, { rate }); return;
+      }
+      if (path === "/api/usage/export" && method === "GET") {
+        const entries = new UsageLedger(store).query(url.searchParams, true).entries;
+        const rows = entries.map(e => ({ id: e.id, createdAtUtc: e.createdAt, brandId: e.brandId, runId: e.runId ?? "", creativeId: e.creativeId ?? "", stageId: e.stageId ?? "", pageId: e.pageId ?? "", threadId: e.threadId ?? "", commentId: e.commentId ?? "", adIds: (e.adIds ?? []).join(";"), shot: e.shotIndex === undefined ? "" : e.shotIndex + 1,
+          provider: e.provider, model: e.model, action: e.action, agentRole: e.agentRole ?? "unattributed", agentVersion: e.agentVersion ?? "", experimentId: e.experimentId ?? "", attempt: e.attempt, state: e.state, costStatus: e.costStatus, currency: e.currency,
+          calculatedUsd: e.costMicros === null ? "" : (e.costMicros / 1e6).toFixed(6), estimateUsd: e.estimatedMicros === null ? "" : (e.estimatedMicros / 1e6).toFixed(6),
+          ...Object.fromEntries(Object.entries(e.metrics).map(([k, v]) => [k, v ?? ""])), requestId: e.requestId, taskId: e.taskId, httpStatus: e.httpStatus ?? "", latencyMs: e.latencyMs ?? "", billingUnit: e.rate.unit,
+          rateSnapshot: JSON.stringify(e.rate), providerUsage: JSON.stringify(e.rawUsage), detail: e.detail }));
+        const keys = rows.length ? Object.keys(rows[0]!) : ["id", "createdAtUtc", "brandId", "provider", "model", "action", "costStatus", "calculatedUsd", "estimateUsd"];
+        res.setHeader("Content-Type", "text/csv; charset=utf-8"); res.setHeader("Content-Disposition", 'attachment; filename="ai-usage.csv"');
+        res.end("\uFEFF" + [keys.map(csv).join(","), ...rows.map(r => keys.map(k => csv((r as Record<string, unknown>)[k])).join(","))].join("\r\n")); return;
+      }
       if (path === "/api/logout" && method === "POST") {
         store.db
           .prepare("DELETE FROM sessions WHERE hash=?")
@@ -734,7 +778,9 @@ export function createApp(options: AppOptions) {
               );
             if (
               !vault.get("openaiKey") ||
-              !(engine.settings().provider === "seedance"
+              !(engine.settings().provider === "minimax"
+                ? vault.get("minimaxKey")
+                : engine.settings().provider === "seedance"
                 ? vault.get("seedanceKey")
                 : vault.get("googleServiceAccount"))
             )

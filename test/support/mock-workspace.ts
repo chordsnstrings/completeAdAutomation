@@ -74,8 +74,12 @@ export class MockServices {
               template:i%2 ? "listicle" : "problem_solution_demo",
               shots:["A ceramic vessel on a warm stone surface. Slow camera movement.","A close view of the ceramic form in soft daylight. Slow camera movement."],
             }))};
-        return Response.json({status:"completed",output:[{content:[{type:"output_text",text:JSON.stringify(value)}]}],usage:{input_tokens:900,output_tokens:250}});
+        return Response.json({status:"completed",output:[{content:[{type:"output_text",text:JSON.stringify(value)}]}],usage:{input_tokens:900,output_tokens:250,input_tokens_details:{cached_tokens:200}}});
       }
+    }
+    if (url.hostname === "api.minimax.io" && path.startsWith("/v2/")) {
+      if (method === "POST" && path === "/v2/video_generation") return Response.json({task_id:`mock-h3-${++this.counter}`},{headers:{"x-request-id":`h3-request-${this.counter}`}});
+      if (method === "GET" && path.startsWith("/v2/query/video_generation/")) return Response.json({task:{id:path.split("/").at(-1),model:"MiniMax-H3",status:this.videoPending?"running":"succeeded",content:{url:"https://media.example.com/shot.mp4"},resolution:"768P",duration:8,ratio:"9:16",usage:{input_seconds:0,output_seconds:8,input_image_count:0,prompt_tokens:1200,completion_tokens:200000,total_tokens:201200}}});
     }
     if (url.hostname === "ark.ap-southeast.bytepluses.com") {
       if (path.endsWith("/models")) return Response.json({data:[]});
@@ -174,7 +178,8 @@ export class MockProduction extends Production {
 }
 export function workspace() {
   const dir=mkdtempSync(join(tmpdir(),"spend-workflow-test-")),store=new Store(dir),vault=new Vault(store),services=new MockServices();
-  for (const name of ["metaToken","metaAppId","metaAppSecret","openaiKey","seedanceKey"] as const) vault.set(name,"test-only-not-a-real-credential");
+  store.setSetting("app", { ...DEFAULT_SETTINGS, provider:"seedance", videoModel:"seedance-1-5-pro-251215" });
+  for (const name of ["metaToken","metaAppId","metaAppSecret","openaiKey","seedanceKey","minimaxKey"] as const) vault.set(name,"test-only-not-a-real-credential");
   const meta=new MockMeta(store,vault,services),production=new MockProduction(store,vault,services),engine=new Engine(store,vault,{meta,production});
   return {dir,store,vault,services,meta,production,engine,clean(){store.close();rmSync(dir,{recursive:true,force:true});}};
 }

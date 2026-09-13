@@ -68,6 +68,7 @@ function workspace() {
   const dir = mkdtempSync(join(tmpdir(), "ad-app-"));
   const store = new Store(dir),
     vault = new Vault(store);
+  store.setSetting("app", { ...DEFAULT_SETTINGS, provider: "seedance", videoModel: "seedance-1-5-pro-251215" });
   // Network adapters below are injected; live transport guards still require a credential.
   vault.set("metaToken", "isolated-test-meta-token");
   return {
@@ -964,9 +965,11 @@ test("HTTP owner setup, CSRF, simulation, media ranges, secret redaction and log
       setTimeout() {},
       Intl,
       URL,
+      URLSearchParams,
       Date,
       console,
       fixtureData: JSON.parse(boot),
+      usageData: await (await req("/api/usage")).json(),
     };
     const code = readFileSync(resolve("ui/app.js"), "utf8").replace(
       "void init();",
@@ -974,7 +977,7 @@ test("HTTP owner setup, CSRF, simulation, media ranges, secret redaction and log
     );
     runInNewContext(
       code +
-        `\nstate.data=fixtureData;state.comments={items:[],total:0,nextOffset:null};state.commentsKey=":attention";state.plans={selected:{templateId:'single_engine',recommendation:{templateId:'single_engine'}},options:[]};for(const [page] of nav){location.hash='#'+page;render();if(!app.innerHTML.includes('<main'))throw Error(page+' did not render');}creativeDetail(state.data.creatives[0].id);brandForm(state.data.brands[0].id);funnelDetail('single_engine');`,
+        `\nstate.data=fixtureData;state.usage=usageData;state.usageKey=usageParams().toString();state.comments={items:[],total:0,nextOffset:null};state.commentsKey=":attention";state.plans={selected:{templateId:'single_engine',recommendation:{templateId:'single_engine'}},options:[]};for(const [page] of nav){location.hash='#'+page;render();if(!app.innerHTML.includes('<main'))throw Error(page+' did not render');}creativeDetail(state.data.creatives[0].id);brandForm(state.data.brands[0].id);funnelDetail('single_engine');`,
       context,
     );
     assert.equal((await req("/api/logout", "POST", {})).status, 200);

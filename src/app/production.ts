@@ -3,6 +3,8 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from "
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { MiniMaxProvider } from "../generation/minimax.ts";
+import { UsageLedger, chatRate, videoRate, speechRate } from "./usage.ts";
 import { SeedanceProvider } from "../generation/seedance.ts";
 import { VeoProvider } from "../generation/veo.ts";
 import { ProviderRequestError } from "../generation/provider.ts";
@@ -93,6 +95,7 @@ export class Production {
   readonly vault: Vault;
   readonly fetchImpl: typeof fetch;
   readonly assetImpl: typeof publicBytes;
+  readonly usage: UsageLedger;
   private google: { token: string; expires: number } | undefined;
   constructor(
     store: Store,
@@ -101,12 +104,13 @@ export class Production {
     assetImpl: typeof publicBytes = publicBytes,
   ) {
     this.store = store;
+    this.usage = new UsageLedger(store);
     this.vault = vault;
     this.fetchImpl = fetchImpl;
     this.assetImpl = assetImpl;
   }
   settings(): Settings {
-    return this.store.setting("app", DEFAULT_SETTINGS);
+    return { ...DEFAULT_SETTINGS, ...this.store.setting<Partial<Settings>>("app", {}) };
   }
   assertAllowed(brand: ManagedBrand, runId: string): void {
     if (this.settings().globalPaused)
@@ -173,6 +177,7 @@ export class Production {
   }
   provider(id: Settings["provider"] = this.settings().provider): VideoProvider {
     const settings = this.settings();
+    if (id === "minimax") return new MiniMaxProvider({ apiKey: this.vault.get("minimaxKey"), fetchImpl: this.fetchImpl, usdPerSecond: this.settings().h3UsdPerSecond ?? 0.08 });
     if (id === "seedance")
       return new SeedanceProvider({
         apiKey: this.vault.get("seedanceKey"),
@@ -251,15 +256,11 @@ export class Production {
       throw new AppError(
         "A text request was interrupted. Its cost remains reserved; retry with a new production attempt.",
       );
-    this.store.reserveCharge(
-      key,
-      brand.id,
-      day,
-      reserve,
-      brand.generationDailyUsd,
-    );
-    if (!this.store.startEffect(key))
-      throw new AppError("This text request is already reserved or completed. Its outcome must be reconciled before another submission.");
+    const creative = this.store.get<Creative>("creatives", key.split(":")[1] ?? "");
+    const usage = this.usage.begin({ brandId: brand.id, provider: "openai", model: settings.textModel, effectKey: key,
+      action: images.length ? "visual-review" : "creative-copy", runId: creative?.runId ?? key.split(":")[1] ?? "", creativeId: creative?.id ?? "", stageId: creative?.stageId ?? "",
+      rate: chatRate(this.store, "openai", settings.textModel), estimatedMicros: reserve }, { day, limitUsd: brand.generationDailyUsd });
+    try {
     const res = await this.fetchImpl("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
@@ -276,6 +277,7 @@ export class Production {
       error?: { message: string };
       status?: string;
     };
+    this.usage.response(usage.id, res, data);
     if (!res.ok) {
       if (res.status < 500 && res.status !== 408)
         this.store.failEffect(key, data.error?.message ?? `HTTP ${res.status}`);
@@ -285,14 +287,6 @@ export class Production {
         data.error?.message ?? `Creative service returned HTTP ${res.status}.`,
       );
     }
-    if (data.usage)
-      this.store.settleCharge(
-        key,
-        Math.ceil(
-          data.usage.input_tokens * settings.textInputUsdPerMillion +
-            data.usage.output_tokens * settings.textOutputUsdPerMillion,
-        ),
-      );
     if (data.status !== "completed")
       throw new AppError(
         "The creative response was incomplete. No draft was approved.",
@@ -309,6 +303,10 @@ export class Production {
     const value = JSON.parse(text) as T;
     this.store.finishEffect(key, value);
     return value;
+    } catch (error) {
+      this.usage.failure(usage.id, "Creative or visual request failed or could not be validated. Any recorded provider usage is retained.");
+      throw error;
+    }
   }
   async draft(brand: ManagedBrand, run: CampaignRun): Promise<Creative[]> {
     const result: Creative[] = [];
@@ -560,9 +558,12 @@ export class Production {
       }
       const key = `video:${c.id}:${c.attempts}:${i}`;
       const prior = this.store.effect(key);
-      if (prior?.state === "done") {
-        shot.taskId = String(prior.value);
-        shot.submittedAt = prior.updatedAt;
+      const recorded = this.usage.forEffect(key);
+      if (prior?.state === "done" || (prior?.state === "pending" && recorded?.taskId)) {
+        shot.taskId = prior.state === "done" ? String(prior.value) : recorded!.taskId;
+        shot.submittedAt = recorded?.createdAt ?? prior.updatedAt;
+        if (prior.state === "pending") this.store.finishEffect(key, shot.taskId);
+        c.generationEstimateUsd += (recorded?.estimatedMicros ?? 0) / 1e6;
         shot.status = "generating";
         this.store.put("creatives", c);
         continue;
@@ -586,31 +587,29 @@ export class Production {
         prompt: `${shot.prompt}\nBrand facts: ${brand.proposition}. No people, faces, logos belonging to others, captions, text, or speech. Use the product reference faithfully. Vertical composition with the product inside the central 60%.`,
         durationSeconds: 8,
         aspectRatio: "9:16",
-        resolution: "720p",
-        audio: false,
-        ...(reference ? { firstFrame: reference } : {}),
+        resolution: c.provider === "minimax" ? "768p" : "720p",
+        audio: c.provider === "minimax",
+        ...(reference ? c.provider === "minimax" ? { referenceImages: [reference] } : { firstFrame: reference } : {}),
       };
       const estimate = provider!.estimateCost(spec);
       const day = new Date().toLocaleDateString("en-CA", {
         timeZone: brand.timezone,
       });
-      this.store.reserveCharge(
-        key,
-        brand.id,
-        day,
-        estimate.microUnits,
-        brand.generationDailyUsd,
-      );
-      if (!this.store.startEffect(key))
-        throw new AppError("This video request already has a recorded outcome. Reconcile it before another submission.");
+      const usage = this.usage.begin({ brandId: brand.id, runId: c.runId, creativeId: c.id, stageId: c.stageId, shotIndex: i,
+        action: "video-generation", provider: c.provider, model: c.model, effectKey: key, rate: videoRate(estimate), estimatedMicros: estimate.microUnits }, { day, limitUsd: brand.generationDailyUsd });
       let task;
       try {
         task = await provider!.submit(spec);
       } catch (error) {
-        if (error instanceof ProviderRequestError && error.httpStatus >= 400 && error.httpStatus < 500 && error.httpStatus !== 408)
-          this.store.failEffect(key, error.message);
+        if (error instanceof ProviderRequestError) {
+          let envelope: unknown = {}; try { envelope = JSON.parse(error.body); } catch { /* No provider receipt. */ }
+          this.usage.response(usage.id, new Response(null, { status: error.httpStatus }), envelope);
+          if (error.httpStatus >= 400 && error.httpStatus < 500 && error.httpStatus !== 408) this.store.failEffect(key, error.message);
+        }
+        this.usage.failure(usage.id, "Video submission failed. Unknown outcomes retain their reservation and are not submitted again automatically.");
         throw error;
       }
+      this.usage.update(usage.id, { taskId: task.taskId, requestId: task.requestId ?? "", state: "running", detail: "Video accepted. Cost is reserved until the task receipt is available." });
       this.store.finishEffect(key, task.taskId);
       shot.taskId = task.taskId;
       shot.submittedAt = nowIso();
@@ -635,6 +634,7 @@ export class Production {
           "Video generation exceeded four hours. The provider task ID is preserved for recovery.",
         );
       const task = await this.provider(c.provider).poll(shot.taskId, 1);
+      this.usage.task(`video:${c.id}:${c.attempts}:${i}`, task);
       if (["FAILED", "EXPIRED"].includes(task.state))
         throw new AppError(
           `Video generation ${task.state.toLowerCase()}: ${task.error?.message ?? task.filteredReasons.join("; ")}`,
@@ -705,15 +705,10 @@ export class Production {
       throw new AppError(
         "Narration was interrupted. Its cost remains reserved. Start a new production attempt.",
       );
-    this.store.reserveCharge(
-      key,
-      brand.id,
-      new Date().toLocaleDateString("en-CA", { timeZone: brand.timezone }),
-      Math.ceil(c.voiceover.length * 15),
-      brand.generationDailyUsd,
-    );
-    if (!this.store.startEffect(key))
-      throw new AppError("Narration already has a recorded request. Restore its output or start a new production attempt.");
+    const characters = Array.from(c.voiceover).length;
+    const usage = this.usage.begin({ brandId: brand.id, runId: c.runId, creativeId: c.id, stageId: c.stageId, action: "narration", provider: "openai", model: "tts-1", effectKey: key,
+      rate: speechRate(), estimatedMicros: Math.ceil(characters * 15) }, { day: new Date().toLocaleDateString("en-CA", { timeZone: brand.timezone }), limitUsd: brand.generationDailyUsd });
+    try {
     const res = await this.fetchImpl("https://api.openai.com/v1/audio/speech", {
       method: "POST",
       headers: {
@@ -727,6 +722,8 @@ export class Production {
         response_format: "mp3",
       }),
     });
+    this.usage.response(usage.id, res);
+    this.usage.update(usage.id, { metrics: { ...this.usage.get(usage.id)!.metrics, characters } });
     if (!res.ok) {
       if (res.status < 500 && res.status !== 408)
         this.store.failEffect(key, `Narration failed (HTTP ${res.status}).`);
@@ -740,6 +737,10 @@ export class Production {
     writeFileSync(`${path}.pending`, bytes, { mode: 0o600 });
     renameSync(`${path}.pending`, path);
     this.store.finishEffect(key, true);
+    } catch (error) {
+      this.usage.failure(usage.id, "Narration failed or its output could not be saved. The request character estimate is retained.");
+      throw error;
+    }
   }
   async render(
     brand: ManagedBrand,

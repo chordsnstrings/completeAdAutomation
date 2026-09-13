@@ -14,6 +14,8 @@ const state = {
   plans: null,
   loadingPlans: false,
   online: true,
+  usage: null, usageLoading: false, usageKey: "", usageRequest: 0, usageError: "", usageOffset: 0,
+  usageFilters: { from: new Date(Date.now()-27*86400000).toISOString().slice(0,10), to: new Date().toISOString().slice(0,10), provider: "", action: "", status: "", run: "", creative: "" },
   comments: null, commentsLoading: false, commentsKey: "", commentFilter: "attention", commentRequest: 0,
 };
 const esc = (v) =>
@@ -38,6 +40,7 @@ const paths = {
     '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="m10 8 6 4-6 4z"/>',
   engagement: '<path d="M21 11a8 8 0 0 1-8 8H7l-5 3 2-6a8 8 0 1 1 17-5z"/><path d="M7 10h10M7 14h6"/>',
   intelligence: '<path d="M4 3h12l4 4v14H4zM14 3v6h6M8 13h8M8 17h5"/>',
+  usage: '<rect x="3" y="2" width="18" height="20" rx="2"/><path d="M7 7h10M7 12h4M7 17h4M15 12h2M15 17h2"/>',
   learning: '<path d="M4 19V9m6 10V4m6 15v-7m5 7H2"/>',
   connections:
     '<path d="m8 3 3 3-5 5-3-3m10 10 5-5 3 3-5 5M8 8l8 8M3 21l4-4M17 7l4-4"/>',
@@ -140,12 +143,67 @@ const nav = [
   ["engagement", "Engagement"],
   ["intelligence", "Page intelligence"],
   ["learning", "Decisions & activity"],
+  ["usage", "Usage & costs"],
   ["connections", "Connections"],
 ];
 const currentPage = () =>
   nav.some((n) => n[0] === location.hash.slice(1))
     ? location.hash.slice(1)
     : "overview";
+const usageLabels = { 'creative-copy':'Creative copy', 'visual-review':'Visual review', 'video-generation':'Video generation', narration:'Narration', 'page-profile':'Page profile', 'comment-draft':'Comment draft', 'reply-verification':'Reply verification', legacy:'Historical record' };
+const costLabels = { calculated:'Calculated', estimated:'Estimated', reserved:'Reserved', unknown:'Unresolved', 'not-charged':'Not charged' };
+const preciseUsd = (micros) => micros === null || micros === undefined ? 'Unknown' : '$' + (micros / 1e6).toLocaleString('en-US',{minimumFractionDigits:4,maximumFractionDigits:6});
+const usageNumber = (v) => v === null || v === undefined ? '—' : v.toLocaleString('en-US',{maximumFractionDigits:6});
+function usageParams() { return new URLSearchParams({ ...state.usageFilters, brand:state.brand, offset:String(state.usageOffset), limit:'50' }); }
+async function loadUsage() {
+  if(state.usageLoading)return;
+  const key=usageParams().toString(), request=++state.usageRequest;state.usageLoading=true;
+  try {
+    const result=await api('/usage?'+key);
+    if(request!==state.usageRequest || key!==usageParams().toString())return;
+    state.usage=result;state.usageError='';state.usageKey=key;
+  } catch(error) { if(key===usageParams().toString()){state.usageError=error.message;state.usage=null;state.usageKey=key;} }
+  finally {state.usageLoading=false;if(currentPage()==='usage')render();}
+}
+function usageBreakdown(title, rows, label=(s)=>s) {
+  return `<section class="panel"><div class="panel-head"><h2>${esc(title)}</h2></div><div class="table-wrap"><table class="usage-breakdown"><thead><tr><th>Source</th><th>Requests</th><th>Calculated</th><th>Est. / reserved</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(label(r.label))}</td><td>${usageNumber(r.requests)}</td><td>${preciseUsd(r.calculatedMicros)}</td><td>${preciseUsd(r.estimatedMicros)}${r.unpricedRequests ? '<span class="sub">'+r.unpricedRequests+' unpriced</span>':''}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">No requests in this view.</td></tr>'}</tbody></table></div></section>`;
+}
+function usage() {
+  const key=usageParams().toString();
+  if(state.usageKey!==key&&!state.usageLoading)void loadUsage();
+  const d=state.usageKey===key ? state.usage : null,t=d?.totals,f=state.usageFilters;
+  const select=(name,label,options)=>`<label>${esc(label)}<select data-usage-filter="${name}">${options.map(([v,l])=>`<option value="${esc(v)}" ${f[name]===v?'selected':''}>${esc(l)}</option>`).join('')}</select></label>`;
+  return heading('Every request, accounted for.','Video seconds, AI tokens, and the cost of each step across your brands.',btn('Model rates','usage-pricing','','','edit')+`<a class="btn" href="/api/usage/export?${esc(usageParams().toString())}">${icon('down',15)}Export CSV</a>`,'Usage & costs')+
+    `<div class="usage-contract"><div class="service">${icon('creatives',23)}</div><div><strong>MiniMax H3 <span class="badge blue">768P</span></strong><p>Published rate: $0.08 / output second · 8s shot $0.64 · 16s creative $1.28</p></div><a href="#connections" class="small">Provider settings ${icon('arrow',13)}</a></div>`+
+    `<section class="panel usage-filters" aria-label="Usage filters"><label>From (UTC)<input type="date" data-usage-filter="from" value="${esc(f.from)}"></label><label>Through (UTC)<input type="date" data-usage-filter="to" value="${esc(f.to)}"></label>${select('provider','Provider',[['','All providers'],['minimax','MiniMax'],['openai','OpenAI'],['glm','Z.AI'],['seedance','Seedance'],['veo','Google Veo'],['unknown','Historical / unknown']])}${select('action','Activity',[['','All activities'],...Object.entries(usageLabels)])}${select('status','Cost status',[['','All statuses'],...Object.entries(costLabels)])}</section>`+
+    (f.run||f.creative ? `<div class="notice">${icon('info')}<span>Showing ${f.run?'campaign run':'creative'} ${esc(f.run||f.creative)}.</span>${btn('Clear','usage-clear','','tiny')}</div>`:'')+
+    (state.usageError ? `<div class="notice error">${esc(state.usageError)} ${btn('Try again','usage-reload','','tiny')}</div>`:'')+
+    `<section class="stats" aria-label="AI cost summary">${stat('Calculated cost',t?preciseUsd(t.calculatedMicros):'—','Provider usage × saved rates · USD','money')}${stat('Estimates & reservations',t?preciseUsd(t.estimatedMicros):'—',t?`${t.pendingRequests} reserved · ${t.unknownRequests} unresolved`:'Awaiting usage data','clock')}${stat('Reported tokens',t?.totalTokensReports?usageNumber(t.totalTokens):'—',t?`${t.cachedTokensReports?usageNumber(t.cachedTokens)+" reported cached":"Cache not reported"} · ${t.reasoningTokensReports?usageNumber(t.reasoningTokens)+" reported reasoning":"reasoning not reported"}`:'Input, output and provider details','spark')}${stat('Generated video seconds',t?.outputVideoSecondsReports?usageNumber(t.outputVideoSeconds):'—',t?`${t.requests} requests · ${usageNumber(t.characters)} narration characters`:'Based on reported task usage','creatives')}</section>`+
+    `<p class="usage-explainer">Calculated costs use saved rates and provider receipts. Estimates are separate and may change. H3 is billed by seconds and extra images; its token counts are informational. Cached and reasoning tokens are subsets, not additional tokens. Narration uses a character estimate. Advertising spend is in Overview.</p>`+
+    (t?.unpricedRequests ? `<div class="notice warn">${icon('info')}<span>${t.unpricedRequests} requests have no usable price or estimate. Totals are incomplete; review their details.</span></div>`:'')+
+    `<div class="usage-breakdowns">${usageBreakdown('By model',d?.byModel||[])}${usageBreakdown('By activity',d?.byAction||[],s=>usageLabels[s]||s)}</div>`+
+    `<section class="panel mt"><div class="panel-head"><div><h2>Request ledger</h2><p>${state.usageLoading?'Loading requests…':`${t?.requests||0} requests match these filters`} · costs shown to a millionth of a dollar</p></div>${btn('Refresh','usage-reload','','tiny','refresh')}</div><div class="table-wrap"><table class="usage-table"><thead><tr><th>Time / brand</th><th>Activity / model</th><th>Input / output tokens</th><th>Video / narration</th><th>USD cost</th><th></th></tr></thead><tbody>${(d?.entries||[]).map(e=>`<tr><td><time datetime="${esc(e.createdAt)}">${esc(e.createdAt.slice(0,19).replace('T',' '))}</time><span class="sub">${esc(brandBy(e.brandId)?.name||e.brandId||'Workspace')} · UTC</span></td><td><strong>${esc(usageLabels[e.action]||e.action)}</strong><span class="sub">${esc(e.model)}${e.shotIndex!==undefined?' · Shot '+(e.shotIndex+1):''}</span><span class="small muted">${esc(human(e.state))} · attempt ${e.attempt}</span></td><td class="usage-numeric">${usageNumber(e.metrics.inputTokens)} / ${usageNumber(e.metrics.outputTokens)}<span class="sub">Cache ${usageNumber(e.metrics.cachedTokens)} · reasoning ${usageNumber(e.metrics.reasoningTokens)}</span><span class="sub">Total ${usageNumber(e.metrics.totalTokens)}</span></td><td>${e.rate.unit==='seconds' ? `${usageNumber(e.metrics.outputVideoSeconds)}s output<span class="sub">${usageNumber(e.metrics.inputVideoSeconds)}s input · ${usageNumber(e.metrics.inputImages)} images</span>` : e.rate.unit==='characters' ? `${usageNumber(e.metrics.characters)} chars` : e.rate.unit==='pixel-frame-tokens' ? `${usageNumber(e.metrics.pixelFrameTokens)} pixel-frame tokens` : '—'}</td><td class="usage-numeric"><strong>${preciseUsd(e.costStatus==='calculated'||e.costStatus==='not-charged'?e.costMicros:e.estimatedMicros)}</strong><span class="sub">${badge(costLabels[e.costStatus],e.costStatus==='calculated'?'green':e.costStatus==='unknown'?'amber':'')}</span></td><td>${btn('Details','usage-detail',e.id,'tiny','arrow')}</td></tr>`).join('') || `<tr><td colspan="6">${empty(state.usageLoading?'Loading usage…':'No paid requests in this view.','Try another date range or brand. Simulation does not incur provider charges.','','money')}</td></tr>`}</tbody></table></div><div class="panel-foot"><span>${d?.entries.length ? `${d.offset+1}–${d.offset+d.entries.length} of ${t.requests}`:'0 requests'} · — means not reported or not applicable</span><div class="heading-actions">${d?.offset?btn('Previous','usage-previous','','tiny'):''}${d?.hasMore?btn('Next','usage-next','','tiny'):''}</div></div></section>`+
+    `<details class="usage-secondary mt"><summary>Agent roles, daily totals & brand allocation</summary><div class="usage-breakdowns mt">${usageBreakdown('By agent role',d?.byAgent||[],s=>human(s))}${usageBreakdown('By day · UTC',(d?.byDay||[]).toSorted((a,b)=>b.label.localeCompare(a.label)))}${usageBreakdown('By brand',d?.byBrand||[],s=>brandBy(s)?.name||s)}</div></details>`+
+    `<p class="small muted mt">Production allowances apply in each brand’s timezone and include outstanding reservations. Engagement has its own daily request allowance. Provider invoices may differ because of credits, discounts, or taxes. Historical records retain only the information originally captured.</p>`;
+}
+function usageDetail(id) {
+  const e=state.usage?.entries.find(e=>e.id===id);if(!e)return;
+  const metricLabels={inputTokens:'Input tokens (includes cache)',outputTokens:'Output tokens (includes reasoning)',totalTokens:'Total tokens',cachedTokens:'Cached input tokens',reasoningTokens:'Reasoning output tokens',inputAudioTokens:'Input audio tokens',outputAudioTokens:'Output audio tokens',inputVideoSeconds:'Input video seconds',outputVideoSeconds:'Output video seconds',inputImages:'Input images',inputAudioSeconds:'Input audio seconds',characters:'Requested narration characters',pixelFrameTokens:'Pixel-frame tokens'};
+  const relevant = e.rate.unit==='tokens'||e.metrics.totalTokens!==null ? ['inputTokens','outputTokens','totalTokens','cachedTokens','reasoningTokens'] : [];
+  if(e.rate.unit==='seconds')relevant.push('inputVideoSeconds','outputVideoSeconds','inputImages');
+  if(e.rate.unit==='characters')relevant.push('characters');
+  if(e.rate.unit==='pixel-frame-tokens')relevant.push('pixelFrameTokens');
+  const lines=Object.entries(e.metrics).filter(([k,v])=>v!==null||relevant.includes(k)).map(([k,v])=>`<tr><th scope="row">${esc(metricLabels[k])}</th><td>${usageNumber(v)}</td></tr>`).join('');
+  const rate=e.rate;
+  const rates=rate.unit==='tokens'?`Input $${rate.input ?? 'unknown'} / 1M · output $${rate.output ?? 'unknown'} / 1M · cache $${rate.cached ?? 'unknown'} / 1M${rate.longContext?`<br>Above ${usageNumber(rate.longContext.threshold)} input tokens: $${rate.longContext.input} / $${rate.longContext.output} / $${rate.longContext.cached} per 1M`:''}`:rate.unit==='seconds'?`$${rate.perSecond} per output or input-video second${rate.extraImage!==null?` · first ${rate.freeImages} images free, then $${rate.extraImage} each`:''}`:rate.unit==='characters'?`$${rate.perMillionCharacters} per million characters`:rate.unit==='pixel-frame-tokens'?`$${rate.output} per million pixel-frame tokens`:'Rate not captured';
+  const context=[['Brand',brandBy(e.brandId)?.name||e.brandId],['Agent role',human(e.agentRole||'unattributed')],['Agent version',e.agentVersion],['Run',e.runId],['Creative',e.creativeId],['Stage',e.stageId],['Page profile',e.pageId],['Thread',e.threadId],['Comment',e.commentId],['Ads',e.adIds?.join(', ')],['Request ID',e.requestId],['Task ID',e.taskId],['HTTP status',e.httpStatus],['Elapsed',e.latencyMs===null?'':`${usageNumber(e.latencyMs)} ms`]].filter(([,v])=>v!==undefined&&v!==null&&v!=='');
+  modal(usageLabels[e.action]||e.action,`${e.model} · ${e.createdAt.slice(0,19).replace('T',' ')} UTC`,
+    `<div class="usage-receipt-head"><div><span class="eyebrow">${esc(costLabels[e.costStatus])} · USD</span><strong>${preciseUsd(e.costStatus==='calculated'||e.costStatus==='not-charged'?e.costMicros:e.estimatedMicros)}</strong></div>${statusBadge(e.state)}</div><p class="small muted">${esc(e.detail||'Request started; awaiting the provider receipt.')}</p><p class="small muted">Original estimate: ${preciseUsd(e.estimatedMicros)} · Attempt ${e.attempt}</p><section class="form-section"><h3>Usage breakdown</h3><div class="table-wrap"><table class="usage-receipt">${lines}</table></div><p class="small muted">— means not reported or not applicable. Cached tokens are included in input; reasoning tokens are included in output. Neither is added again to the total.</p></section><section class="form-section"><h3>Rate saved for this request</h3><p class="small">${rates}</p><p class="small muted">${esc(rate.note)}</p><p class="small muted">${esc(rate.source)}${rate.verifiedAt?' · '+esc(rate.verifiedAt):''}</p></section><details class="form-section"><summary>Attribution & provider receipt</summary><dl class="usage-context">${context.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}<dt>Ledger ID</dt><dd>${esc(e.id)}</dd></dl><details><summary class="small">Reported usage fields</summary><pre class="code">${esc(JSON.stringify(e.rawUsage,null,2))}</pre></details></details><div class="form-footer">${e.creativeId&&state.data.creatives.some(c=>c.id===e.creativeId)?btn('Open creative','creative-detail',e.creativeId,'tiny'):''}${btn('Close','close','','primary')}</div>`);
+}
+async function usagePricing() {
+  const {rates}=await api('/usage/pricing');
+  modal('Model rates','USD per million tokens. Changes apply to future requests.',`<p class="small muted">H3 video and OpenAI text rates are in Connections. Each paid request saves its own rate for an auditable history. These are standard pay-as-you-go estimates; use your contracted rates if different.</p>${rates.map(({key,model,rate:r})=>`<form data-form="usage-rate" data-key="${esc(key)}" class="form-section"><h3>${esc(model)}</h3><p class="small muted">${esc(r.source)} · ${esc(r.verifiedAt)}</p><div class="form-error" role="alert"></div><div class="form-grid">${field('input','Input / 1M',r.input,{type:'number',min:0,step:'0.000001',required:true})}${field('output','Output / 1M',r.output,{type:'number',min:0,step:'0.000001',required:true})}${field('cached','Cached input / 1M',r.cached,{type:'number',min:0,step:'0.000001',required:true})}${r.longContext?field('longInput','Above 512K: input / 1M',r.longContext.input,{type:'number',min:0,step:'0.000001',required:true})+field('longOutput','Above 512K: output / 1M',r.longContext.output,{type:'number',min:0,step:'0.000001',required:true})+field('longCached','Above 512K: cache / 1M',r.longContext.cached,{type:'number',min:0,step:'0.000001',required:true}):''}</div><div class="form-footer"><button class="btn primary">Save ${esc(model)} rates</button></div></form>`).join('')}`);
+}
 const brandBy = (id) => state.data.brands.find((b) => b.id === id);
 const offset = (currency) => {
   const rules = state.data?.currencyRules;
@@ -268,7 +326,7 @@ function render() {
   const paused = d.settings.globalPaused;
   const expandedRuns = new Set([...app.querySelectorAll("[data-run-detail][open]")].map(el => el.dataset.runDetail));
   document.title = `${nav.find((n) => n[0] === page)[1]} · Spend Control`;
-  app.innerHTML = `<div class="shell"><aside class="sidebar"><a class="logo" href="#overview"><img src="/mark.svg" alt="">Spend Control</a><div class="workspace"><div class="workspace-icon">${icon("brands", 15)}</div><div><strong>Your workspace</strong><span>Meta advertising</span></div></div><div class="eyebrow nav-label">Workspace</div><nav class="nav" aria-label="Main navigation">${nav.map(([id, label]) => `<a href="#${id}" class="${page === id ? "active" : ""}" ${page === id ? 'aria-current="page"' : ""}>${icon(id)}${label}${id === "campaigns" && d.runs.filter((r) => r.status === "blocked").length ? `<span class="count">${d.runs.filter((r) => r.status === "blocked").length}</span>` : ""}</a>`).join("")}</nav><div class="sidebar-bottom"><div class="sync-status"><span class="dot ${paused || !state.online || !d.worker.enabled ? "paused" : ""}"></span>${!state.online ? "Connection interrupted" : paused ? "Workspace paused" : d.worker.enabled ? "Worker connected" : "Worker stopped"}</div><div class="account"><div class="avatar">SC</div><div><strong class="small">${esc(d.facebook?.owner || "Workspace owner")}</strong><p class="muted small">Administrator</p></div><button class="icon-btn" data-action="password" aria-label="Account settings">${icon("key", 16)}</button></div></div></aside><div class="main-wrap"><div class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="menu" aria-label="Toggle navigation" aria-expanded="false">${icon("menu")}</button><span>Workspace</span><span>/</span><strong>${nav.find((n) => n[0] === page)[1]}</strong></div><div class="top-actions"><select aria-label="Filter by brand" id="brand-filter"><option value="">All brands</option>${d.brands.map((b) => `<option value="${esc(b.id)}" ${state.brand === b.id ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select><span class="divider"></span><button class="icon-btn" data-action="refresh" aria-label="Refresh workspace">${icon("refresh", 16)}</button>${btn(paused ? "Resume workspace" : "Pause all", paused ? "resume-all" : "pause-all", "", paused ? "soft" : "", "" + (paused ? "play" : "pause"))}</div></div><main id="main" tabindex="-1">${d.facebook?.status === "reconnect_required" ? `<div class="notice warn">${icon("connections")}<span>${esc(d.facebook.reason)} Existing Meta delivery may continue until pause requests are confirmed.</span><button class="btn tiny" data-action="facebook-connect">Reconnect</button></div>` : ""}${paused ? `<div class="notice warn">${icon("pause")}<span>${d.settings.emergencyPending ? "Pause requests are still being retried with Meta. Delivery may continue until Meta confirms them." : "The workspace is paused. Resume it and enable a brand to continue autonomous work."}</span></div>` : ""}${!state.online ? `<div class="notice error">${icon("info")}Connection interrupted. Showing the last received data.</div>` : ""}${{ overview, brands, campaigns, funnels, creatives, engagement, intelligence, learning, connections }[page]()}<footer class="footer-note"><span>${icon("shield", 12)} Yours to direct. Built to work quietly.</span><span>Spend Control · Meta workspace</span></footer></main></div></div>`;
+  app.innerHTML = `<div class="shell"><aside class="sidebar"><a class="logo" href="#overview"><img src="/mark.svg" alt="">Spend Control</a><div class="workspace"><div class="workspace-icon">${icon("brands", 15)}</div><div><strong>Your workspace</strong><span>Meta advertising</span></div></div><div class="eyebrow nav-label">Workspace</div><nav class="nav" aria-label="Main navigation">${nav.map(([id, label]) => `<a href="#${id}" class="${page === id ? "active" : ""}" ${page === id ? 'aria-current="page"' : ""}>${icon(id)}${label}${id === "campaigns" && d.runs.filter((r) => r.status === "blocked").length ? `<span class="count">${d.runs.filter((r) => r.status === "blocked").length}</span>` : ""}</a>`).join("")}</nav><div class="sidebar-bottom"><div class="sync-status"><span class="dot ${paused || !state.online || !d.worker.enabled ? "paused" : ""}"></span>${!state.online ? "Connection interrupted" : paused ? "Workspace paused" : d.worker.enabled ? "Worker connected" : "Worker stopped"}</div><div class="account"><div class="avatar">SC</div><div><strong class="small">${esc(d.facebook?.owner || "Workspace owner")}</strong><p class="muted small">Administrator</p></div><button class="icon-btn" data-action="password" aria-label="Account settings">${icon("key", 16)}</button></div></div></aside><div class="main-wrap"><div class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="menu" aria-label="Toggle navigation" aria-expanded="false">${icon("menu")}</button><span>Workspace</span><span>/</span><strong>${nav.find((n) => n[0] === page)[1]}</strong></div><div class="top-actions"><select aria-label="Filter by brand" id="brand-filter"><option value="">All brands</option>${d.brands.map((b) => `<option value="${esc(b.id)}" ${state.brand === b.id ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select><span class="divider"></span><button class="icon-btn" data-action="refresh" aria-label="Refresh workspace">${icon("refresh", 16)}</button>${btn(paused ? "Resume workspace" : "Pause all", paused ? "resume-all" : "pause-all", "", paused ? "soft" : "", "" + (paused ? "play" : "pause"))}</div></div><main id="main" tabindex="-1">${d.facebook?.status === "reconnect_required" ? `<div class="notice warn">${icon("connections")}<span>${esc(d.facebook.reason)} Existing Meta delivery may continue until pause requests are confirmed.</span><button class="btn tiny" data-action="facebook-connect">Reconnect</button></div>` : ""}${paused ? `<div class="notice warn">${icon("pause")}<span>${d.settings.emergencyPending ? "Pause requests are still being retried with Meta. Delivery may continue until Meta confirms them." : "The workspace is paused. Resume it and enable a brand to continue autonomous work."}</span></div>` : ""}${!state.online ? `<div class="notice error">${icon("info")}Connection interrupted. Showing the last received data.</div>` : ""}${{ overview, brands, campaigns, funnels, creatives, engagement, intelligence, learning, usage, connections }[page]()}<footer class="footer-note"><span>${icon("shield", 12)} Yours to direct. Built to work quietly.</span><span>Spend Control · Meta workspace</span></footer></main></div></div>`;
   app.querySelectorAll("[data-run-detail]").forEach(el => { el.open = expandedRuns.has(el.dataset.runDetail); });
   $(".sidebar").inert = window.innerWidth <= 760;
   if (
@@ -460,7 +518,7 @@ function campaigns() {
           .map((r) => {
             const b = brandBy(r.brandId),
               index = r.phase === "complete" ? 9 : phaseIds.indexOf(r.phase);
-            return `<article class="panel run-card"><div class="run-top"><div class="run-title">${symbol(b)}<div><h3>${esc(b?.name ?? r.brandId)} <span class="muted small">/ ${esc(r.id.slice(0, 8))}</span></h3><p>${esc(r.plan?.template?.name ?? "Planning campaign")} · ${time(r.createdAt)} · ${r.creativeIds.length} creatives</p></div></div><div>${modeBadge(r.mode)} ${statusBadge(r.status)}</div></div><div class="pipeline" aria-label="Campaign progress">${phaseLabels.map((label, i) => `<div class="pipeline-step ${i < index ? "done" : i === index ? (r.status === "blocked" ? "failed" : "current") : ""}"><div class="track"></div><span>${label}</span></div>`).join("")}</div>${r.error ? `<div class="notice error">${icon("info")}<span>${esc(r.error)}</span></div>` : ""}<div class="run-bottom"><span>${r.mode === "SIMULATE" ? "No real spend" : `Video production estimate: $${r.generationCostUsd.toFixed(2)}`} · ${r.stages.length} ${r.stages.length === 1 ? "stage" : "stages"} ${r.nextAt ? `· Next step ${time(r.nextAt)}` : ""}</span><div class="heading-actions">${r.status === "blocked" ? btn("Retry step", "retry-run", r.id, "tiny soft", "refresh") : ""}${r.status !== "cancelled" ? btn("Pause brand", "pause-run", r.id, "tiny", "pause") : ""}</div></div>${r.stages.length || r.warnings.length ? `<details class="run-detail" data-run-detail="${esc(r.id)}"><summary>Campaign details & checks</summary>${r.warnings.length ? `<ul>${r.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}${r.stages.map((s) => `<p>${esc(human(s.stageId))} · ${esc(money(s.dailyBudgetMinor, b.currency))}/day · ${s.active ? "Active" : "Paused"} · ${esc(human(s.primaryAction.replace(/^offsite_conversion\.(fb_pixel_)?/, "").replace(/^onsite_conversion\./, "")))}</p>`).join("")}</details>` : ""}</article>`;
+            return `<article class="panel run-card"><div class="run-top"><div class="run-title">${symbol(b)}<div><h3>${esc(b?.name ?? r.brandId)} <span class="muted small">/ ${esc(r.id.slice(0, 8))}</span></h3><p>${esc(r.plan?.template?.name ?? "Planning campaign")} · ${time(r.createdAt)} · ${r.creativeIds.length} creatives</p></div></div><div>${modeBadge(r.mode)} ${statusBadge(r.status)}</div></div><div class="pipeline" aria-label="Campaign progress">${phaseLabels.map((label, i) => `<div class="pipeline-step ${i < index ? "done" : i === index ? (r.status === "blocked" ? "failed" : "current") : ""}"><div class="track"></div><span>${label}</span></div>`).join("")}</div>${r.error ? `<div class="notice error">${icon("info")}<span>${esc(r.error)}</span></div>` : ""}<div class="run-bottom"><span>${r.mode === "SIMULATE" ? "No real spend" : `Video production estimate: $${r.generationCostUsd.toFixed(2)}`} · ${r.stages.length} ${r.stages.length === 1 ? "stage" : "stages"} ${r.nextAt ? `· Next step ${time(r.nextAt)}` : ""}</span><div class="heading-actions">${r.mode !== "SIMULATE" ? btn("View costs", "usage-run", r.id, "tiny", "money") : ""}${r.status === "blocked" ? btn("Retry step", "retry-run", r.id, "tiny soft", "refresh") : ""}${r.status !== "cancelled" ? btn("Pause brand", "pause-run", r.id, "tiny", "pause") : ""}</div></div>${r.stages.length || r.warnings.length ? `<details class="run-detail" data-run-detail="${esc(r.id)}"><summary>Campaign details & checks</summary>${r.warnings.length ? `<ul>${r.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}${r.stages.map((s) => `<p>${esc(human(s.stageId))} · ${esc(money(s.dailyBudgetMinor, b.currency))}/day · ${s.active ? "Active" : "Paused"} · ${esc(human(s.primaryAction.replace(/^offsite_conversion\.(fb_pixel_)?/, "").replace(/^onsite_conversion\./, "")))}</p>`).join("")}</details>` : ""}</article>`;
           })
           .join("")
       : empty(
@@ -658,18 +716,19 @@ function connections() {
       "A few considered connections power the whole workflow.",
       btn("Check connections", "check-connections", "", "", "shield"),
     ) +
-    `<div class="connection-grid">${facebookPanel()}${engagementConnections()}<form class="panel connection" data-form="connections"><div class="connection-title"><div class="service">${icon("spark", 22)}</div><h3>OpenAI</h3>${badge(c.openaiKey ? "Credentials saved" : "Not connected", c.openaiKey ? "green" : "")}</div><p>Writes grounded scripts, produces narration, and reviews the rendered films against the brand brief.</p><div class="form-error" role="alert"></div><div class="form-grid">${secret("openaiKey", "API key")}${field("textModel", "Text & vision model", s.textModel, { full: true, required: true })}${field("textInputUsdPerMillion", "Input price / 1M tokens (USD)", s.textInputUsdPerMillion, { type: "number", min: 0.01, step: ".01" })}${field("textOutputUsdPerMillion", "Output price / 1M tokens (USD)", s.textOutputUsdPerMillion, { type: "number", min: 0.01, step: ".01" })}</div><div class="form-footer"><button class="btn primary">Save OpenAI connection</button></div><div class="secret-note">${icon("info", 12)} Keep model rates current for production cost reservations.</div></form><form class="panel connection" data-form="connections"><div class="connection-title"><div class="service">${icon("creatives", 21)}</div><h3>Video generation</h3>${badge(c[s.provider === "seedance" ? "seedanceKey" : "googleServiceAccount"] ? "Credentials saved" : "Not connected", c[s.provider === "seedance" ? "seedanceKey" : "googleServiceAccount"] ? "green" : "")}</div><p>Choose Seedance or Google Veo. Production is limited by each brand’s daily USD allowance.</p><div class="form-error" role="alert"></div><div class="form-grid">${field(
+    `<div class="connection-grid">${facebookPanel()}${engagementConnections()}<form class="panel connection" data-form="connections"><div class="connection-title"><div class="service">${icon("spark", 22)}</div><h3>OpenAI</h3>${badge(c.openaiKey ? "Credentials saved" : "Not connected", c.openaiKey ? "green" : "")}</div><p>Writes grounded scripts, produces narration, and reviews the rendered films against the brand brief.</p><div class="form-error" role="alert"></div><div class="form-grid">${secret("openaiKey", "API key")}${field("textModel", "Text & vision model", s.textModel, { full: true, required: true })}${field("textInputUsdPerMillion", "Input price / 1M tokens (USD)", s.textInputUsdPerMillion, { type: "number", min: 0.01, step: ".01" })}${field("textCachedUsdPerMillion", "Cached input price / 1M tokens (USD)", s.textCachedUsdPerMillion ?? 0.1, { type: "number", min: 0, step: ".01" })}${field("textOutputUsdPerMillion", "Output price / 1M tokens (USD)", s.textOutputUsdPerMillion, { type: "number", min: 0.01, step: ".01" })}</div><div class="form-footer"><button class="btn primary">Save OpenAI connection</button></div><div class="secret-note">${icon("info", 12)} Keep model rates current for production cost reservations.</div></form><form class="panel connection" data-form="connections"><div class="connection-title"><div class="service">${icon("creatives", 21)}</div><h3>Video generation</h3>${badge(c[s.provider === "minimax" ? "minimaxKey" : s.provider === "seedance" ? "seedanceKey" : "googleServiceAccount"] ? "Credentials saved" : "Not connected", c[s.provider === "minimax" ? "minimaxKey" : s.provider === "seedance" ? "seedanceKey" : "googleServiceAccount"] ? "green" : "")}</div><p>MiniMax H3 generates at 768P for $0.08 per second at the published rate. Two 8-second shots cost $1.28 before copy, narration, and review. Each brand’s production allowance limits new requests.</p><div class="form-error" role="alert"></div><div class="form-grid">${field(
       "provider",
       "Provider",
       s.provider,
       {
         options: [
+          ["minimax", "MiniMax H3 · 768P"],
           ["seedance", "Seedance · BytePlus"],
           ["veo", "Veo · Google Cloud"],
         ],
         full: true,
       },
-    )}${field("videoModel", "Video model ID", s.videoModel, { full: true, required: true })}${secret("seedanceKey", "Seedance API key")}${field("googleServiceAccount", "Google service account JSON", "", { area: true, full: true, placeholder: c.googleServiceAccount ? "Connected · leave blank to keep" : "Paste the service account JSON securely" })}${field("googleProject", "Google Cloud project", s.googleProject)}${field("googleRegion", "Region", s.googleRegion)}${field("googleBucket", "Output bucket URI", s.googleBucket, { full: true, placeholder: "gs://your-bucket/generated/" })}</div><div class="form-footer"><button class="btn primary">Save video provider</button></div></form><form class="panel connection" data-form="connections"><div class="connection-title"><div class="service">${icon("connections", 21)}</div><h3>Feedback & delivery</h3>${badge("Optional")}</div><p>Send consented website conversions back to Meta and deliver incoming form leads to your CRM.</p><div class="form-error" role="alert"></div><div class="form-grid">${secret("conversionWebhookToken", "Conversion webhook bearer token", "Choose a long random secret and use it in your website’s server integration.")}${secret("leadWebhookSecret", "CRM webhook signing secret", "The receiver verifies X-Signature-SHA256 over timestamp.body and deduplicates X-Event-ID.")}${field("pollMinutes", "Reporting interval (minutes)", s.pollMinutes, { type: "number", min: 15, step: "1", full: true })}</div><div class="code">POST /api/webhooks/conversions</div><div class="form-footer"><a class="btn tiny" href="/api/export?kind=leads">${icon("down", 13)}Export ${d.leadCount} leads</a><button class="btn primary">Save feedback settings</button></div></form></div>`
+    )}${field("videoModel", "Video model ID", s.videoModel, { full: true, required: true })}${secret("minimaxKey", "MiniMax pay-as-you-go API key", "Shared with MiniMax engagement models. A subscription or coding-plan key does not cover H3 video.")}${field("h3UsdPerSecond", "H3 768P price per second (USD)", s.h3UsdPerSecond ?? 0.08, {type:"number",min:0.000001,step:"0.000001",help:"Default $0.08. Captured on each request; changing it affects future generations."})}${secret("seedanceKey", "Seedance API key")}${field("googleServiceAccount", "Google service account JSON", "", { area: true, full: true, placeholder: c.googleServiceAccount ? "Connected · leave blank to keep" : "Paste the service account JSON securely" })}${field("googleProject", "Google Cloud project", s.googleProject)}${field("googleRegion", "Region", s.googleRegion)}${field("googleBucket", "Output bucket URI", s.googleBucket, { full: true, placeholder: "gs://your-bucket/generated/" })}</div><div class="form-footer"><button class="btn primary">Save video provider</button></div></form><form class="panel connection" data-form="connections"><div class="connection-title"><div class="service">${icon("connections", 21)}</div><h3>Feedback & delivery</h3>${badge("Optional")}</div><p>Send consented website conversions back to Meta and deliver incoming form leads to your CRM.</p><div class="form-error" role="alert"></div><div class="form-grid">${secret("conversionWebhookToken", "Conversion webhook bearer token", "Choose a long random secret and use it in your website’s server integration.")}${secret("leadWebhookSecret", "CRM webhook signing secret", "The receiver verifies X-Signature-SHA256 over timestamp.body and deduplicates X-Event-ID.")}${field("pollMinutes", "Reporting interval (minutes)", s.pollMinutes, { type: "number", min: 15, step: "1", full: true })}</div><div class="code">POST /api/webhooks/conversions</div><div class="form-footer"><a class="btn tiny" href="/api/export?kind=leads">${icon("down", 13)}Export ${d.leadCount} leads</a><button class="btn primary">Save feedback settings</button></div></form></div>`
   );
 }
 function brandForm(id = "") {
@@ -762,7 +821,7 @@ function creativeDetail(id) {
       )
       .join(
         "",
-      )}</div></div><details class="form-section mt"><summary>Policy & visual review</summary>${checks(c.policy)}${c.visual ? checks([{ name: "Visual review", severity: c.visual.verdict, detail: c.visual.findings.join(" ") }]) : '<p class="muted small">Visual review is pending.</p>'}</details><details class="form-section"><summary>Technical checks · all formats</summary>${checks(c.qa)}</details><details class="form-section"><summary>Production details</summary><p class="small muted">${esc(c.provider)} · ${esc(c.model)}</p>${c.shots.map((s, i) => `<div class="code">Shot ${i + 1} · ${esc(s.status)}\nTask: ${esc(s.taskId || "Not submitted")}</div>`).join("")}</details>`,
+      )}</div></div><details class="form-section mt"><summary>Policy & visual review</summary>${checks(c.policy)}${c.visual ? checks([{ name: "Visual review", severity: c.visual.verdict, detail: c.visual.findings.join(" ") }]) : '<p class="muted small">Visual review is pending.</p>'}</details><details class="form-section"><summary>Technical checks · all formats</summary>${checks(c.qa)}</details><details class="form-section"><summary>Production details</summary>${btn("View all requests & costs", "usage-creative", c.id, "tiny", "money")}<p class="small muted">${esc(c.provider)} · ${esc(c.model)}</p>${c.shots.map((s, i) => `<div class="code">Shot ${i + 1} · ${esc(s.status)}\nTask: ${esc(s.taskId || "Not submitted")}</div>`).join("")}</details>`,
   );
 }
 function funnelDetail(id) {
@@ -779,11 +838,19 @@ async function refresh(show = false) {
   const d = await api("/bootstrap");
   state.data = d;
   if(currentPage()==="engagement")state.commentsKey="";
+  if(currentPage()==="usage")state.usageKey="";
   state.online = true;
   if (show) toast("Workspace updated.");
   render();
 }
 async function action(name, id, el) {
+  if(name === "usage-detail"){usageDetail(id);return;}
+  if(name === "usage-reload"){state.usageKey="";await loadUsage();return;}
+  if(name === "usage-next" || name === "usage-previous"){state.usageOffset=Math.max(0,state.usageOffset+(name==="usage-next"?50:-50));render();return;}
+  if(name === "usage-pricing"){await usagePricing();return;}
+  if(name === "usage-clear"){state.usageFilters.run="";state.usageFilters.creative="";state.usageOffset=0;render();return;}
+  if(name === "usage-run" || name === "usage-creative"){if(dialog.open)dialog.close();state.usageFilters.run=name==="usage-run"?id:"";state.usageFilters.creative=name==="usage-creative"?id:"";state.usageOffset=0;location.hash="usage";render();return;}
+
   if(name === "engagement-settings"){engagementSettings(id);return;}
   if(name === "engagement-subscribe"){await api(`/engagement/${id}/subscribe`,"POST",{});toast("Facebook comment notifications enabled.");return;}
   if(name === "engagement-sync"){await api(`/engagement/${id}/sync`,"POST",{});toast("Comment and destination checks queued.");return;}
@@ -1041,6 +1108,8 @@ document.addEventListener("click", async (e) => {
   }
 });
 document.addEventListener("change", (e) => {
+  if(e.target.dataset.usageFilter){state.usageFilters[e.target.dataset.usageFilter]=e.target.value;state.usageOffset=0;render();}
+
   if(e.target.id === "comment-filter"){state.commentFilter=e.target.value;state.comments=null;render();}
   if(e.target.name === "replyProvider"){e.target.form.elements.replyModel.innerHTML=state.data.engagement.models[e.target.value].map(m=>`<option>${esc(m)}</option>`).join("");}
 
@@ -1055,6 +1124,7 @@ document.addEventListener("change", (e) => {
   }
   if (e.target.id === "brand-filter") {
     state.brand = e.target.value;
+    state.usageOffset=0;
     if (state.brand) state.currency = brandBy(state.brand).currency;
     state.plans = null;
     state.funnelBrand = state.brand;
@@ -1080,7 +1150,7 @@ document.addEventListener("change", (e) => {
   if (e.target.name === "provider") {
     const form = e.target.form;
     form.elements.videoModel.value =
-      e.target.value === "veo"
+      e.target.value === "minimax" ? "MiniMax-H3" : e.target.value === "veo"
         ? "veo-3.1-generate-001"
         : "seedance-1-5-pro-251215";
   }
@@ -1212,6 +1282,11 @@ document.addEventListener("submit", async (e) => {
       await refresh();
       toast("Brand saved.");
     }
+    if (form.dataset.form === "usage-rate") {
+      const payload={key:form.dataset.key,input:Number(values.input),output:Number(values.output),cached:Number(values.cached)};
+      if(form.elements.longInput)payload.longContext={input:Number(values.longInput),output:Number(values.longOutput),cached:Number(values.longCached)};
+      await api("/usage/pricing","POST",payload);toast("Rate saved for future requests.");await usagePricing();
+    }
     if (form.dataset.form === "connections") {
       const secretNames = [
         "metaAppId",
@@ -1237,6 +1312,8 @@ document.addEventListener("submit", async (e) => {
             [
               "textInputUsdPerMillion",
               "textOutputUsdPerMillion",
+              "textCachedUsdPerMillion",
+              "h3UsdPerSecond",
               "pollMinutes",
             ].includes(k)
               ? Number(v)

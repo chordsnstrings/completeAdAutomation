@@ -39,7 +39,7 @@ export class EngagementServices {
       const value = system.startsWith("Extract") ? { facts: [{ label: "Material", value: "Glazed stoneware", quote: "The NORD vessel is made from glazed stoneware." }, { label: "Care", value: "Clean gently by hand", quote: "Clean it by hand with a soft cloth." }] }
         : system.startsWith("Check") ? { safe: !this.refuseReview, grounded: !this.refuseReview, reason: "Verified against supplied page text." }
         : { answer: this.inventedLink ? "Buy at https://unapproved.example now." : "It’s made from glazed stoneware and is intended for indoor use. You can clean it gently by hand with a soft cloth.", needsReview: false, confidence: 0.96, evidence: [{ sourceId: (data["sources"] as Array<{ id: string }>)[0]!.id, quote: this.badEvidence ? "Every order includes guaranteed same-day delivery." : "The NORD vessel is made from glazed stoneware." }] };
-      return Response.json({ choices: [{ finish_reason: "stop", message: { content: (this.modelThinking ? "<think>Private test reasoning</think>" : "") + JSON.stringify(value) } }], usage: { total_tokens: 750 } });
+      return Response.json({ choices: [{ finish_reason: "stop", message: { content: (this.modelThinking ? "<think>Private test reasoning</think>" : "") + JSON.stringify(value) } }], usage: { prompt_tokens: 550, completion_tokens: 200, total_tokens: 750, prompt_tokens_details: { cached_tokens: 100 }, completion_tokens_details: { reasoning_tokens: 50 } } });
     }
     if (url.hostname !== "graph.facebook.com") throw new Error("Unexpected model or Graph request blocked.");
     if (path === "act_123456/ads" && method === "GET") return Response.json({ data: this.ads });

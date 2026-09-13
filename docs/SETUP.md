@@ -166,3 +166,8 @@ video against an account that cannot deliver.
 Between those, spend moves inside a hard envelope you set once. That is not a human in the
 loop; it is the difference between an autonomous system and an unbounded one. The envelope
 is a number you change, not an approval you grant.
+
+
+## MiniMax H3 and usage
+
+New workspaces use MiniMax-H3 at 768P. Save a MiniMax pay-as-you-go API key in Connections; existing workspaces can select it as their video provider. The default rate is USD 0.08/output second. [Usage & costs](USAGE-AND-COSTS.md) explains accounting, token details, exports and historical records.

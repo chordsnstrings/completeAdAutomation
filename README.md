@@ -42,7 +42,7 @@ For another hosting platform, deploy the Dockerfile with a persistent volume at 
 
 ## Connect and launch
 
-1. **Facebook:** complete the one-time [Facebook Login for Business setup](docs/FACEBOOK-LOGIN.md), sign in, and select your accessible ad accounts and Pages. An advanced system-user connection remains available. In Connections, also save an OpenAI API key and either a Seedance key or a Google Cloud service account, project, region, and output bucket.
+1. **Facebook:** complete the one-time [Facebook Login for Business setup](docs/FACEBOOK-LOGIN.md), sign in, and select your accessible ad accounts and Pages. An advanced system-user connection remains available. In Connections, also save an OpenAI API key and a MiniMax pay-as-you-go key for H3 video. Seedance and Google Veo remain optional providers. H3 defaults to 768P at $0.08 per output second.
 2. **Meta Business Settings:** make sure the connected person (or optional system user) has the required roles on the ad account, Page, pixel, and other assets. Complete billing, app permissions and required access reviews, account verification, domain/event configuration, and advertising authorizations. Configure an **account spending limit in Meta**; the live preflight blocks an absent or exhausted cap. Set default DSA payor and beneficiary for EU advertising.
 3. **Brands:** enter the destination, conversion goal, approved factual claims, creative constraints, account currency, daily advertising budget, maximum combined configured daily budget, and daily USD production allowance. Add a genuine product reference image when product fidelity matters.
 4. **Funnel studio:** compare Single Engine, Seed & Harvest, Broad + Recapture, Full Three-Stage, and Value Ladder. The planner checks learning budgets and audience/history requirements. Connect existing customer lists or engagement audiences where required; the application cannot manufacture historical customer data.
@@ -73,12 +73,18 @@ Connect **MiniMax or GLM-5.2** in Connections and configure each brand in **Enga
 
 See [the engagement setup and behavior](docs/ENGAGEMENT.md) for permissions, supported models, webhook setup, source-read limitations, and delivery semantics. Public comments are covered; a private-message inbox bot is a separate integration.
 
+## AI usage and agent integration
+
+**Usage & costs** shows every paid production and engagement request, with token details, video seconds, per-request cost estimates/receipts, model/activity/agent-role breakdowns, campaign/creative attribution and CSV export. H3 video is **$1.28 for two 8-second shots** at the default 768P rate; copy, narration and review are additional. See [usage and cost accounting](docs/USAGE-AND-COSTS.md).
+
+The [Agent Studio integration plan](docs/AGENT-STUDIO-PLAN.md) specifies a provider-agnostic creative team, per-role model choices (including MiniMax and GLM), parallel work, shared brand learning, predicted costs and eventual ROI evaluation. This update supplies its metering and role-attribution foundation; the proposed multi-agent coordinator and ROI evaluation are not deployed yet.
+
 ## Spending and recovery
 
 - Advertising amounts use the account currency and minor units internally. The UI keeps currencies separate and clearly distinguishes simulation data.
 - The combined **configured daily budgets** of managed active campaigns cannot exceed the brand ceiling. A Meta daily budget is not a guaranteed single-day cash-spend limit. The native account spending cap is the hard backstop and includes other activity on that account.
 - The optional brand total-spend stop uses reported spend and can overshoot because of reporting delay. It is not a native Meta lifetime budget.
-- Generation reserves estimated USD costs before paid calls, including scripts, narration, video tasks, and visual review. Completed text responses settle against returned usage. Interrupted requests retain their reservation. Keep configured model prices current and set provider-side limits where available.
+- Generation reserves estimated USD costs before paid calls, including scripts, narration, video tasks, and visual review. Complete text/video receipts settle against returned usage and saved rates. Interrupted requests retain their reservation. Keep configured model prices current and set provider-side limits where available.
 - SQLite persists jobs, leases, attempts, paid-request reservations, created-object ownership, decisions, and side effects. Restarting resumes work. If a Meta create times out, the application scans for its deterministic name before proceeding. An uncertain absent result stops instead of blindly duplicating a create. Retry rescans; if the provider cannot establish what happened, resolve it in the provider account or cancel the brand’s production and start a new cycle.
 - **Pause all** persists the stop before external requests, blocks later activations, pauses managed campaigns, and retries unsuccessful Meta pauses. The UI explicitly reports pending pauses. It cannot stop Meta while Meta is unreachable, nor cancel an already accepted video-generation charge.
 - Manual changes to campaign/ad set delivery in Meta pause automation rather than silently recreating the delivery you stopped. The application does not manage unrelated campaign IDs.

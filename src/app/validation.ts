@@ -373,7 +373,7 @@ export function validateSettings(input: unknown, previous: Settings): Settings {
   const o = object(input);
   const next = { ...previous };
   if (o["provider"] !== undefined) {
-    if (!["veo", "seedance"].includes(String(o["provider"])))
+    if (!["veo", "seedance", "minimax"].includes(String(o["provider"])))
       throw new AppError("Choose a video provider.");
     next.provider = o["provider"] as Settings["provider"];
   }
@@ -388,8 +388,10 @@ export function validateSettings(input: unknown, previous: Settings): Settings {
   for (const k of [
     "textInputUsdPerMillion",
     "textOutputUsdPerMillion",
+    "textCachedUsdPerMillion",
+    "h3UsdPerSecond",
   ] as const)
-    if (o[k] !== undefined) next[k] = number(o[k], k, 0.01, 1000);
+    if (o[k] !== undefined) next[k] = number(o[k], k, k === "textCachedUsdPerMillion" ? 0 : 0.000001, k === "h3UsdPerSecond" ? 100 : 1000);
   if (o["pollMinutes"] !== undefined)
     next.pollMinutes = number(
       o["pollMinutes"],
@@ -398,5 +400,6 @@ export function validateSettings(input: unknown, previous: Settings): Settings {
       1440,
       true,
     );
+  if (next.provider === "minimax" && next.videoModel !== "MiniMax-H3") throw new AppError("Select MiniMax-H3 for 768P video generation.");
   return next;
 }

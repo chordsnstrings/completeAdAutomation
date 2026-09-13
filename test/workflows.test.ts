@@ -100,7 +100,7 @@ for (const provider of ["veo","seedance"] as const) test(`${provider} receives t
   const w=workspace();try{
     const b=fixture({productImage:"https://example.com/product.png",creativesPerCycle:1});w.store.put("brands",b);
     const r=w.engine.createRun(b.id);r.plan=planFor(b);const [c]=await w.production.draft(b,r);
-    c!.provider=provider;c!.model=provider==="veo"?"veo-3.1-fast-generate-001":DEFAULT_SETTINGS.videoModel;
+    c!.provider=provider;c!.model=provider==="veo"?"veo-3.1-fast-generate-001":"seedance-1-5-pro-251215";
     let sent:Record<string,unknown>|undefined;
     class P extends Production {override provider(){return provider==="veo"?new VeoProvider({projectId:"test-project",storageUri:"gs://test-bucket/out",accessToken:"mock",fetchImpl:async(_u,i)=>{sent=JSON.parse(String(i!.body));return Response.json({name:"mock-operation"});}}):super.provider("seedance");}}
     const p=new P(w.store,w.vault,w.services.fetch,w.services.asset);await p.submit(b,c!);

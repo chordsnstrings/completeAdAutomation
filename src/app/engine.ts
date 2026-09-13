@@ -107,7 +107,7 @@ export class Engine {
     this.engagement = new Engagement(store, vault, this.meta, options.fetchImpl, options.pageTransport);
   }
   settings(): Settings {
-    return this.store.setting("app", DEFAULT_SETTINGS);
+    return { ...DEFAULT_SETTINGS, ...this.store.setting<Partial<Settings>>("app", {}) };
   }
   brand(id: string): ManagedBrand {
     const brand = this.store.get<ManagedBrand>("brands", id);
@@ -402,6 +402,8 @@ export class Engine {
               "Connect OpenAI for scripts, narration and visual review.",
             );
           const provider = this.settings().provider;
+          if (provider === "minimax" && !connections["minimaxKey"])
+            throw new AppError("Connect a MiniMax pay-as-you-go API key for H3 video generation.");
           if (provider === "seedance" && !connections["seedanceKey"])
             throw new AppError("Connect Seedance in Connections.");
           if (provider === "veo" && !connections["googleServiceAccount"])

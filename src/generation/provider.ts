@@ -21,7 +21,7 @@
  *     instead of at assembly time when the money is already spent.
  */
 
-export type ProviderId = 'veo' | 'seedance';
+export type ProviderId = 'veo' | 'seedance' | 'minimax';
 
 /**
  * Every ratio observed across the live catalogue. `4:5` is included precisely so it
@@ -32,7 +32,7 @@ export type AspectRatio =
   | '21:9' | '1.91:1' | '16:9' | '3:2' | '5:4' | '4:3'
   | '1:1' | '4:5' | '3:4' | '9:16' | 'adaptive';
 
-export type Resolution = '480p' | '720p' | '1080p' | '4k';
+export type Resolution = '480p' | '720p' | '768p' | '1080p' | '4k';
 
 /** `none` — the model has no audio track at all. `always` — audio cannot be turned off. */
 export type AudioSupport = 'none' | 'optional' | 'always';
@@ -95,7 +95,7 @@ export interface ConcurrencyLimit {
    * `derived-from-rpm` — the vendor publishes only a request rate; the number here is
    * an operational stand-in so the semaphore stays uniform, NOT a vendor limit.
    */
-  readonly source: 'documented' | 'derived-from-rpm';
+  readonly source: 'documented' | 'derived-from-rpm' | 'operational';
   /** Narrower caps for specific resolutions. 4K on Dreamina 2.0 is 1, not 3 or 10. */
   readonly overrides: readonly { readonly resolution: Resolution; readonly limit: number }[];
 }
@@ -118,7 +118,7 @@ export interface ModelCapabilities {
   readonly resolutions: readonly Resolution[];
   readonly aspectRatios: readonly AspectRatio[];
   /** 24 on every model probed, on both providers. Neither exposes an fps control. */
-  readonly fps: number;
+  readonly fps: number | undefined;
   readonly audio: AudioSupport;
   readonly keyframes: KeyframeSupport;
   readonly maxSamplesPerRequest: number;
@@ -181,6 +181,8 @@ export interface GenerationSpec {
   readonly negativePrompt?: string;
   readonly firstFrame?: ImageRef;
   readonly lastFrame?: ImageRef;
+  /** H3 reference images preserve a requested ratio; keyframes use the image ratio. */
+  readonly referenceImages?: readonly ImageRef[];
   /** Veo `storageUri` (gs://). Overrides the provider default. Ignored by Seedance. */
   readonly outputUri?: string;
   /** Seedance `callback_url`. Ignored by Veo, which uses Pub/Sub instead. */
@@ -214,6 +216,8 @@ export interface CostEstimate {
   readonly exact: boolean;
   /** The arithmetic, in words, so a spend ledger row can be audited later. */
   readonly basis: string;
+  /** Explicit price per billing unit when extra input charges are also in the estimate. */
+  readonly usdPerUnit?: number;
 }
 
 export type TaskState = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'EXPIRED';
@@ -259,6 +263,8 @@ export interface TaskStatus {
   readonly error: ProviderTaskError | undefined;
   /** Actual billed units, once the provider reports them. Reconcile against the estimate. */
   readonly billedUnits: number | undefined;
+  /** Provider receipt, retained independently of the pricing unit. Never contains prompts. */
+  readonly usage?: Readonly<Record<string, unknown>>;
   /** Epoch ms after which the result URL is dead. Seedance: 24h. Re-host before this. */
   readonly resultExpiresAt: number | undefined;
 }
@@ -271,6 +277,7 @@ export interface SubmitResult {
   readonly submittedAt: number;
   /** The pre-submit estimate. Nothing can be cancelled after this point — see below. */
   readonly estimate: CostEstimate;
+  readonly requestId?: string;
 }
 
 export interface VideoProvider {
@@ -419,6 +426,8 @@ export function planAspectRatio(caps: ModelCapabilities, deliverAt: AspectRatio)
 
 /** Throws a CapabilityError naming the exact field and the actual cause. */
 export function assertSpecSupported(caps: ModelCapabilities, spec: GenerationSpec): void {
+  if (spec.referenceImages?.length && caps.providerId !== 'minimax')
+    throw new CapabilityError(caps.providerId, caps.modelId, 'referenceImages', 'Reference images are supported by the H3 adapter only.');
   const fail = (field: string, message: string): never => {
     throw new CapabilityError(caps.providerId, caps.modelId, field, message);
   };

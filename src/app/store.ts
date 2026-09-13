@@ -3,6 +3,7 @@ import { mkdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Collection, Job, Effect, Activity } from "./types.ts";
+import { migrateUsage } from "./usage.ts";
 import { AppError, nowIso } from "./types.ts";
 
 /** SQLite owns cross-process exclusion and durable job/effect state. */
@@ -31,8 +32,13 @@ export class Store {
       CREATE INDEX IF NOT EXISTS jobs_ready ON jobs(state,due,lease_until);
       CREATE TABLE IF NOT EXISTS charges(key TEXT PRIMARY KEY,brand_id TEXT NOT NULL,day TEXT NOT NULL,micros INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS charges_daily ON charges(brand_id,day);
+      CREATE TABLE IF NOT EXISTS ai_usage(id TEXT PRIMARY KEY,effect_key TEXT NOT NULL,brand_id TEXT NOT NULL,created_at TEXT NOT NULL,data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS ai_usage_date ON ai_usage(created_at,id);
+      CREATE INDEX IF NOT EXISTS ai_usage_brand ON ai_usage(brand_id,created_at,id);
+      CREATE INDEX IF NOT EXISTS ai_usage_effect ON ai_usage(effect_key);
       CREATE TABLE IF NOT EXISTS locks(name TEXT PRIMARY KEY,owner TEXT NOT NULL,until_ms INTEGER NOT NULL);
       PRAGMA optimize;`);
+    migrateUsage(this);
   }
   close(): void {
     this.db.close();
@@ -247,7 +253,10 @@ export class Store {
     micros: number,
     limitUsd: number,
   ): void {
-    this.transaction(() => {
+    this.transaction(() => this.reserveChargeInTransaction(key, brandId, day, micros, limitUsd));
+  }
+  /** Call within a transaction that also records the request and acquires its effect. */
+  reserveChargeInTransaction(key: string, brandId: string, day: string, micros: number, limitUsd: number): void {
       const prior = this.db.prepare("SELECT day,micros FROM charges WHERE key=?").get(key);
       if (prior && this.effect(key)?.state !== "failed") return;
       // A definitively rejected attempt may be retried on another account day.
@@ -265,7 +274,6 @@ export class Store {
       this.db
         .prepare("INSERT INTO charges VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET day=excluded.day,micros=excluded.micros")
         .run(key, brandId, day, micros);
-    });
   }
   settleCharge(key: string, micros: number): void {
     if (Number.isSafeInteger(micros) && micros >= 0)

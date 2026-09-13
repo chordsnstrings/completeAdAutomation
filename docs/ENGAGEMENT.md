@@ -71,3 +71,6 @@ Owner-authenticated, CSRF-protected mutations:
 - `GET/POST /api/meta/webhook` — public verification and signed notifications.
 
 `test/engagement.test.ts` verifies provider contracts with all network transport injected: per-destination profiles, Page authorization, both reply endpoints, deduplication, existing human answers, interrupted writes, privacy/security gates, model/evidence failures, stale source versions, budgets and review mode. `test/facebook-login.test.ts` covers OAuth, ownership, recovery, signed callbacks, webhook HTTP verification, and CSRF. Screenshots use the explicit disposable browser fixture and mocked provider responses. Real Meta and model access must be verified on the deployed workspace before enabling public replies.
+
+
+Page profiling, drafts and reply verification now appear individually in **Usage & costs**, including provider token/cache details and USD estimates/calculations. The per-brand daily AI request limit is unchanged; engagement costs are reported separately from the production allowance. See [usage accounting](USAGE-AND-COSTS.md) and the [Agent Studio plan](AGENT-STUDIO-PLAN.md).
