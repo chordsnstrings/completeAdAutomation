@@ -1,6 +1,6 @@
 # Spend Control
 
-A complete, self-hosted workspace for Meta advertising: a Swedish-inspired minimal interface, brand configuration, five funnel strategies, generated video creatives, paused staging, live delivery, reporting, and bounded autonomous optimization.
+A complete, self-hosted workspace for Meta advertising: a Swedish-inspired minimal interface, brand configuration, five funnel strategies, generated video creatives, paused staging, live delivery, reporting, bounded autonomous optimization, Facebook owner login, and contextual ad-comment engagement.
 
 The application runs on **Node.js 24, SQLite, and FFmpeg**. The server owns credentials and external requests; the browser never receives provider tokens. Existing research, domain libraries, and CLI tools are retained.
 
@@ -15,7 +15,7 @@ npm run build
 npm start
 ```
 
-Open **http://localhost:3000**. Read the one-time setup token from `data/setup-token` on your server and create an owner password of at least 12 characters. Do not share the setup token. Development with automatic server restarts uses `npm run dev`.
+Open **http://localhost:3000**. Read the one-time setup token from `data/setup-token` on your server. Create an owner password of at least 12 characters for local work, or configure Facebook sign-in after providing a public HTTPS origin. Do not share the setup token. Development with automatic server restarts uses `npm run dev`.
 
 Choose **Explore a simulation** to add a clearly labelled example brand, then select **Run**. Simulation exercises planning, writing, local video assembly, quality checks, publishing adapters, activation state, and illustrative reporting without paid API calls. It renders actual 16-second test films in three formats; this takes a few minutes on a modest CPU. It does not simulate authentic provider-generated footage or prove access to a real ad account.
 
@@ -42,8 +42,8 @@ For another hosting platform, deploy the Dockerfile with a persistent volume at 
 
 ## Connect and launch
 
-1. **Connections:** save a Meta app ID, app secret, and system user token; an OpenAI API key; and either a Seedance key or a Google Cloud service account, project, region, and output bucket. Discover assigned Pages and ad accounts in the interface.
-2. **Meta Business Settings:** assign the system user to the ad account, Page, pixel, and any other required assets. Complete billing, app permissions, account verification, domain/event configuration, and any required advertising authorizations. Configure an **account spending limit in Meta**; the live preflight blocks an absent or exhausted cap. Set default DSA payor and beneficiary for EU advertising.
+1. **Facebook:** complete the one-time [Facebook Login for Business setup](docs/FACEBOOK-LOGIN.md), sign in, and select your accessible ad accounts and Pages. An advanced system-user connection remains available. In Connections, also save an OpenAI API key and either a Seedance key or a Google Cloud service account, project, region, and output bucket.
+2. **Meta Business Settings:** make sure the connected person (or optional system user) has the required roles on the ad account, Page, pixel, and other assets. Complete billing, app permissions and required access reviews, account verification, domain/event configuration, and advertising authorizations. Configure an **account spending limit in Meta**; the live preflight blocks an absent or exhausted cap. Set default DSA payor and beneficiary for EU advertising.
 3. **Brands:** enter the destination, conversion goal, approved factual claims, creative constraints, account currency, daily advertising budget, maximum combined configured daily budget, and daily USD production allowance. Add a genuine product reference image when product fidelity matters.
 4. **Funnel studio:** compare Single Engine, Seed & Harvest, Broad + Recapture, Full Three-Stage, and Value Ladder. The planner checks learning budgets and audience/history requirements. Connect existing customer lists or engagement audiences where required; the application cannot manufacture historical customer data.
 5. **Staging:** run a full paid production cycle that creates Meta campaigns, ad sets, creatives, and ads **paused**. This is the account-specific rehearsal. It consumes production allowance but does not activate advertising.
@@ -66,6 +66,12 @@ Managed video-view audiences refresh as each new creative cycle is uploaded. Eve
 | App installs                  | Meta app ID and app store destination                                                                                                                               |
 
 Actual eligibility, reviews, permissions, and destination behavior are enforced by Meta. A successful local test does not replace a successful staging run on the intended account.
+
+## Page intelligence and engagement
+
+Connect **MiniMax or GLM-5.2** in Connections and configure each brand in **Engagement**. The worker discovers ad posts, reads their distinct landing pages, and builds source profiles under **Page intelligence**. It collects Facebook/Instagram comments, drafts contextual replies, verifies them against the relevant source, and adds the ad’s message or form invitation. Approved FAQ replies, review mode, manual approval, duplicate protection, coverage checks, and separate daily reply/model-request allowances are included. Automatic public replies are off until configured.
+
+See [the engagement setup and behavior](docs/ENGAGEMENT.md) for permissions, supported models, webhook setup, source-read limitations, and delivery semantics. Public comments are covered; a private-message inbox bot is a separate integration.
 
 ## Spending and recovery
 

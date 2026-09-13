@@ -38,6 +38,8 @@ import type { ReviewFeedback, LineageState } from "../policy/screen.ts";
 import { Store } from "./store.ts";
 import { Vault } from "./security.ts";
 import { MetaGateway } from "./meta.ts";
+import { Engagement } from "./engagement.ts";
+import type { EngagementConfig } from "./engagement.ts";
 import { Production } from "./production.ts";
 import type { publicBytes } from "./network.ts";
 import { planFor } from "./planner.ts";
@@ -81,12 +83,14 @@ export interface EngineOptions {
   production?: Production;
   meta?: MetaGateway;
   webhookTransport?: typeof publicBytes;
+  pageTransport?: typeof publicBytes;
 }
 export class Engine {
   readonly store: Store;
   readonly vault: Vault;
   readonly meta: MetaGateway;
   readonly production: Production;
+  readonly engagement: Engagement;
   private readonly webhookTransport: typeof publicBytes | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private busy = false;
@@ -100,6 +104,7 @@ export class Engine {
       options.meta ?? new MetaGateway(store, vault, options.fetchImpl);
     this.production =
       options.production ?? new Production(store, vault, options.fetchImpl);
+    this.engagement = new Engagement(store, vault, this.meta, options.fetchImpl, options.pageTransport);
   }
   settings(): Settings {
     return this.store.setting("app", DEFAULT_SETTINGS);
@@ -188,12 +193,14 @@ export class Engine {
     let job: Job | undefined;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     try {
+      this.meta.refreshConnectionState();
       const settings = this.settings();
       if (settings.emergencyPending) {
         await this.pauseAll();
         return;
       }
       if (settings.globalPaused) return;
+      for (const c of this.store.list<EngagementConfig>("engagement")) if (c.mode !== "off") this.store.enqueue("engagement-discover", c.brandId, Date.now(), false);
       for (const brand of this.store.list<ManagedBrand>("brands")) {
         if (brand.autonomy)
           this.store.enqueue("monitor", brand.id, Date.now(), false);
@@ -225,6 +232,24 @@ export class Engine {
         due = Date.now() + (more ? 1000 : this.settings().pollMinutes * 60000);
       } else if (job.kind === "pause") {
         await this.pauseBrand(job.entityId);
+      } else if (job.kind === "engagement-discover") {
+        if (this.engagement.config(job.entityId).mode !== "off") {
+          await this.engagement.discover(job.entityId); due = Date.now() + 15 * 60000;
+        }
+      } else if (job.kind === "comment-sync") {
+        const thread = this.store.get<{ brandId: string }>("commentThreads", job.entityId);
+        if (thread && this.engagement.config(thread.brandId).mode !== "off") {
+          await this.engagement.sync(job.entityId); due = Date.now() + 5 * 60000;
+        }
+      } else if (job.kind === "comment-reply") {
+        due = await this.engagement.send(job.entityId);
+      } else if (job.kind === "comment-draft") {
+        await this.engagement.draft(job.entityId);
+      } else if (job.kind === "page-knowledge") {
+        const page = this.store.get<{ brandId: string }>("pageKnowledge", job.entityId);
+        if (page && this.engagement.config(page.brandId).mode !== "off" && this.engagement.config(page.brandId).aiEnabled) {
+          await this.engagement.intelligence.refresh(job.entityId); due = Date.now() + 86400000;
+        }
       }
       this.store.finish(job, due);
     } catch (e) {
@@ -271,6 +296,7 @@ export class Engine {
           );
           return;
         }
+        this.meta.recordAuthError(e);
         const transient =
           e instanceof RateLimited ||
           e instanceof TransientAppError ||
@@ -289,10 +315,11 @@ export class Engine {
                 job.kind === "lead" ||
                 job.kind === "lead-sync" ||
                 job.kind === "conversion" ||
-                job.kind === "pause"
+                job.kind === "pause" || job.kind === "comment-sync" || job.kind === "engagement-discover" || job.kind === "page-knowledge"
               ? Date.now() + 3600000
               : undefined;
         this.store.finish(job, due, message);
+        this.engagement.failure(job.kind, job.entityId, message, Boolean(due));
         if (job.kind === "run") {
           const run = this.store.get<CampaignRun>("runs", job.entityId);
           if (run && run.status !== "cancelled") {
@@ -861,7 +888,7 @@ export class Engine {
         throw new AppError("This creative lineage is permanently halted.");
       const uploader = new VideoUploader({
         adAccountId: brand.adAccountId,
-        accessToken: this.vault.get("metaToken"),
+        accessToken: run.mode === "SIMULATE" ? "" : this.meta.token(),
         appSecret: this.vault.get("metaAppSecret"),
         mode: run.mode,
         fetchImpl: this.meta.fetchImpl,

@@ -21,6 +21,11 @@ export class Store {
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS secrets(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY,csrf TEXT NOT NULL,expires INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS oauth_states(hash TEXT PRIMARY KEY,browser_hash TEXT NOT NULL,expires INTEGER NOT NULL,data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS page_tokens(page_id TEXT PRIMARY KEY,value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS deletion_requests(code TEXT PRIMARY KEY,created_at TEXT NOT NULL,status TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS engagement_ai_usage(id TEXT PRIMARY KEY,brand_id TEXT NOT NULL,day TEXT NOT NULL,model TEXT NOT NULL,tokens INTEGER NOT NULL DEFAULT 0);
+      CREATE INDEX IF NOT EXISTS engagement_ai_daily ON engagement_ai_usage(brand_id,day);
       CREATE TABLE IF NOT EXISTS effects(key TEXT PRIMARY KEY,state TEXT NOT NULL,value TEXT NOT NULL,updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,kind TEXT NOT NULL,entity_id TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'queued',due INTEGER NOT NULL,lease TEXT NOT NULL DEFAULT '',lease_until INTEGER NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT '');
       CREATE INDEX IF NOT EXISTS jobs_ready ON jobs(state,due,lease_until);

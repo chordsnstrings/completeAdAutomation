@@ -11,6 +11,10 @@ import { Engine } from "../../src/app/engine.ts";
 import type { CampaignRun, ManagedBrand, Settings } from "../../src/app/types.ts";
 import { DEFAULT_SETTINGS } from "../../src/app/types.ts";
 import { MockServices, MockMeta, MockProduction, fixture, finish } from "./mock-workspace.ts";
+import { EngagementServices } from "./engagement-services.ts";
+import type { AdComment, CommentThread } from "../../src/app/engagement.ts";
+import type { PageKnowledge } from "../../src/app/page-intelligence.ts";
+import { META_PERMISSIONS, invalidateMetaConnection } from "../../src/app/meta-auth.ts";
 
 // Explicitly disposable browser fixture. No production database, credentials, worker,
 // or provider transport is used. Authentication itself is tested over the real API;
@@ -18,9 +22,16 @@ import { MockServices, MockMeta, MockProduction, fixture, finish } from "./mock-
 if (process.env["SC_ENABLE_QA"] !== "1") throw new Error("This test fixture requires SC_ENABLE_QA=1.");
 const dir=mkdtempSync(join(tmpdir(),"spend-browser-test-"));
 const services=new MockServices();services.mediaDir=resolve(process.argv[2]??"../workflow-evidence/media");
+const engagementServices=new EngagementServices(), workflowFetch=services.fetch;
+services.fetch=async(input,init)=>{
+  const url=new URL(String(input)),path=url.pathname.replace(/^\/v\d+\.\d+\//,"");
+  if(["me/adaccounts","me/accounts","me/assigned_pages","me/businesses"].includes(path)||/adspixels$|instagram_accounts$|leadgen_forms$|advertisable_applications$/.test(path)||/\/(comments|replies|subscribed_apps)$/.test(path)||engagementServices.nodes.has(path)||(path==="act_123456/ads"&&url.searchParams.get("fields")?.includes("effective_object_story_id")))return engagementServices.fetch(input,init);
+  return workflowFetch(input,init);
+};
 const origin="http://terminal.local:4173";
 const app=createApp({dataDir:dir,uiDir:resolve("ui"),origin,startWorker:false,
-  engineFactory:(s,v)=>new Engine(s,v,{meta:new MockMeta(s,v,services),production:new MockProduction(s,v,services)})});
+  oauthFetchImpl:engagementServices.oauth.fetch,
+  engineFactory:(s,v)=>new Engine(s,v,{meta:new MockMeta(s,v,services),production:new MockProduction(s,v,services),fetchImpl:engagementServices.fetch,pageTransport:engagementServices.page})});
 await new Promise<void>(resolve=>app.server.listen(0,"127.0.0.1",resolve));
 const upstream=`http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
 let cookie="",csrf="";const password=randomBytes(32).toString("base64url");
@@ -35,7 +46,7 @@ async function api(path:string,method="GET",body?:unknown) {
 const proxy=createServer(async(req,res)=>{
   try{
     const headers=new Headers();for(const [key,value]of Object.entries(req.headers))if(value&&!["host","connection","content-length"].includes(key))headers.set(key,Array.isArray(value)?value.join(","):value);
-    if(cookie)headers.set("cookie",cookie);
+    headers.delete("cookie");if(cookie)headers.set("cookie",cookie);
     const chunks:Buffer[]=[];for await(const chunk of req)chunks.push(chunk);
     const response=await fetch(upstream+(req.url??"/"),{method:req.method??"GET",headers,...(chunks.length?{body:new Uint8Array(Buffer.concat(chunks))}:{})});
     res.statusCode=response.status;response.headers.forEach((value,key)=>{if(!["transfer-encoding","content-encoding","content-length","connection"].includes(key))res.setHeader(key,value);});
@@ -47,6 +58,29 @@ console.log(JSON.stringify({ready:true,origin,isolated:true,worker:false}));
 let current="";
 async function command(input:Record<string,unknown>) {
   const action=String(input["action"]);
+  if(action==="auth-view"){cookie="";console.log(JSON.stringify({action,ok:true}));return;}
+  if(action==="facebook"){
+    app.vault.set("metaAppId","1234567890");app.vault.set("metaAppSecret","test-only-app-secret-12345");app.vault.set("metaLoginConfigId","9876543210");app.vault.set("metaUserToken","test-user-credential");app.vault.set("glmKey","test-glm-credential");app.vault.set("minimaxKey","test-minimax-credential");app.vault.set("metaWebhookVerifyToken","test-only-verification-token");
+    app.store.setSetting("metaOwner",{id:"123456789012345",appId:"1234567890",name:"Alex Morgan"});
+    app.store.setSetting("metaConnection",{method:"oauth",status:"connected",appId:"1234567890",userId:"123456789012345",name:"Alex Morgan",permissions:Object.keys(META_PERMISSIONS),expiresAt:Date.now()+60*86400000,dataAccessExpiresAt:Date.now()+90*86400000,connectedAt:new Date().toISOString(),reason:""});
+    app.store.setSetting("metaSelection",{accountIds:["act_123456"],pageIds:["456789"],updatedAt:new Date().toISOString()});await app.engine.meta.discover();console.log(JSON.stringify({action,ok:true}));return;
+  }
+  if(action==="reconnect"){invalidateMetaConnection(app.store,app.vault,"Facebook access has expired. Reconnect to restore access.");console.log(JSON.stringify({action,ok:true}));return;}
+  if(action==="prepare"){
+    await command({action:"setup"});await command({action:"brand",brand:{mode:"LIVE",instagramUserId:"777777"}});
+    const preparedBrand=app.engine.brand("nord");await api("/api/brands/nord/autonomy","POST",{enabled:true,dailyBudgetMinor:preparedBrand.spend.dailyBudgetMinor,maxDailyBudgetMinor:preparedBrand.spend.maxDailyBudgetMinor});
+    const run=await api("/api/brands/nord/run","POST",{});await finish(app.engine,String(run.id));
+    await command({action:"performance",kind:"mixed"});await command({action:"facebook"});
+    app.engine.engagement.save("nord",{mode:"auto",dailyLimit:50,rules:[{label:"Care",questions:["How do I clean it?"],reply:"Clean it gently by hand with a soft cloth."}],aiEnabled:true,provider:"glm",model:"glm-5.2",aiDailyLimit:100,knowledgeUrls:[]});
+    await app.engine.engagement.discover("nord");
+    engagementServices.comment("456789_900001","What is it made of?");engagementServices.comment("456789_900002","How do I clean it?");engagementServices.comment("456789_900003","Is this available in matte white?");engagementServices.comment("456789_900004","Mine arrived damaged. Can you help?");engagementServices.comment("456789_900005","Can I book a consultation for a larger order?","456789_800002");engagementServices.comment("179001","What is it made of?","178001");
+    for(const t of app.store.list<CommentThread>("commentThreads"))await app.engine.engagement.sync(t.id);
+    for(const p of app.store.list<PageKnowledge>("pageKnowledge"))await app.engine.engagement.intelligence.refresh(p.id);
+    const comments=app.store.list<AdComment>("comments");
+    for(const remote of ["456789_900001","179001"])await app.engine.engagement.draft(comments.find(c=>c.remoteId===remote)!.id);
+    for(const remote of ["456789_900001","456789_900002"])await app.engine.engagement.send(comments.find(c=>c.remoteId===remote)!.id);
+    console.log(JSON.stringify({action,ok:true,pages:app.store.count("pageKnowledge"),comments:app.store.count("comments")}));return;
+  }
   if(action==="setup"){
     await api("/api/setup","POST",{token:setupToken(app.store),password});
     for(const name of ["metaToken","metaAppId","metaAppSecret","openaiKey","seedanceKey"] as const)app.vault.set(name,"test-only-not-a-real-credential");

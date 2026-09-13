@@ -14,6 +14,7 @@ const state = {
   plans: null,
   loadingPlans: false,
   online: true,
+  comments: null, commentsLoading: false, commentsKey: "", commentFilter: "attention", commentRequest: 0,
 };
 const esc = (v) =>
   String(v ?? "").replace(
@@ -35,6 +36,8 @@ const paths = {
   funnels: '<path d="M3 4h18l-7 9v6l-4 2v-8z"/>',
   creatives:
     '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="m10 8 6 4-6 4z"/>',
+  engagement: '<path d="M21 11a8 8 0 0 1-8 8H7l-5 3 2-6a8 8 0 1 1 17-5z"/><path d="M7 10h10M7 14h6"/>',
+  intelligence: '<path d="M4 3h12l4 4v14H4zM14 3v6h6M8 13h8M8 17h5"/>',
   learning: '<path d="M4 19V9m6 10V4m6 15v-7m5 7H2"/>',
   connections:
     '<path d="m8 3 3 3-5 5-3-3m10 10 5-5 3 3-5 5M8 8l8 8M3 21l4-4M17 7l4-4"/>',
@@ -134,6 +137,8 @@ const nav = [
   ["campaigns", "Campaigns"],
   ["funnels", "Funnel studio"],
   ["creatives", "Creative library"],
+  ["engagement", "Engagement"],
+  ["intelligence", "Page intelligence"],
   ["learning", "Decisions & activity"],
   ["connections", "Connections"],
 ];
@@ -244,6 +249,7 @@ function modal(title, subtitle, body, narrow = false) {
   dialog.className = narrow ? "dialog-narrow" : "";
   dialog.innerHTML = `<header class="dialog-head"><div><h2 id="dialog-title">${esc(title)}</h2>${subtitle ? `<p>${esc(subtitle)}</p>` : ""}</div><button type="button" class="icon-btn" data-action="close" aria-label="Close dialog">${icon("close")}</button></header><div class="dialog-body">${body}</div>`;
   if (!dialog.open) dialog.showModal();
+  dialog.scrollTop = 0;
 }
 const heading = (title, description, actions = "", eyebrow = "") =>
   `<header class="page-heading"><div>${eyebrow ? `<div class="eyebrow">${esc(eyebrow)}</div>` : ""}<h1>${esc(title)}</h1><p>${esc(description)}</p></div><div class="heading-actions">${actions}</div></header>`;
@@ -262,7 +268,7 @@ function render() {
   const paused = d.settings.globalPaused;
   const expandedRuns = new Set([...app.querySelectorAll("[data-run-detail][open]")].map(el => el.dataset.runDetail));
   document.title = `${nav.find((n) => n[0] === page)[1]} · Spend Control`;
-  app.innerHTML = `<div class="shell"><aside class="sidebar"><a class="logo" href="#overview"><img src="/mark.svg" alt="">Spend Control</a><div class="workspace"><div class="workspace-icon">${icon("brands", 15)}</div><div><strong>Your workspace</strong><span>Meta advertising</span></div></div><div class="eyebrow nav-label">Workspace</div><nav class="nav" aria-label="Main navigation">${nav.map(([id, label]) => `<a href="#${id}" class="${page === id ? "active" : ""}" ${page === id ? 'aria-current="page"' : ""}>${icon(id)}${label}${id === "campaigns" && d.runs.filter((r) => r.status === "blocked").length ? `<span class="count">${d.runs.filter((r) => r.status === "blocked").length}</span>` : ""}</a>`).join("")}</nav><div class="sidebar-bottom"><div class="sync-status"><span class="dot ${paused || !state.online || !d.worker.enabled ? "paused" : ""}"></span>${!state.online ? "Connection interrupted" : paused ? "Workspace paused" : d.worker.enabled ? "Worker connected" : "Worker stopped"}</div><div class="account"><div class="avatar">SC</div><div><strong class="small">Workspace owner</strong><p class="muted small">Administrator</p></div><button class="icon-btn" data-action="password" aria-label="Account settings">${icon("key", 16)}</button></div></div></aside><div class="main-wrap"><div class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="menu" aria-label="Toggle navigation" aria-expanded="false">${icon("menu")}</button><span>Workspace</span><span>/</span><strong>${nav.find((n) => n[0] === page)[1]}</strong></div><div class="top-actions"><select aria-label="Filter by brand" id="brand-filter"><option value="">All brands</option>${d.brands.map((b) => `<option value="${esc(b.id)}" ${state.brand === b.id ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select><span class="divider"></span><button class="icon-btn" data-action="refresh" aria-label="Refresh workspace">${icon("refresh", 16)}</button>${btn(paused ? "Resume workspace" : "Pause all", paused ? "resume-all" : "pause-all", "", paused ? "soft" : "", "" + (paused ? "play" : "pause"))}</div></div><main id="main" tabindex="-1">${paused ? `<div class="notice warn">${icon("pause")}<span>${d.settings.emergencyPending ? "Pause requests are still being retried with Meta. Delivery may continue until Meta confirms them." : "The workspace is paused. Resume it and enable a brand to continue autonomous work."}</span></div>` : ""}${!state.online ? `<div class="notice error">${icon("info")}Connection interrupted. Showing the last received data.</div>` : ""}${{ overview, brands, campaigns, funnels, creatives, learning, connections }[page]()}<footer class="footer-note"><span>${icon("shield", 12)} Yours to direct. Built to work quietly.</span><span>Spend Control · Meta workspace</span></footer></main></div></div>`;
+  app.innerHTML = `<div class="shell"><aside class="sidebar"><a class="logo" href="#overview"><img src="/mark.svg" alt="">Spend Control</a><div class="workspace"><div class="workspace-icon">${icon("brands", 15)}</div><div><strong>Your workspace</strong><span>Meta advertising</span></div></div><div class="eyebrow nav-label">Workspace</div><nav class="nav" aria-label="Main navigation">${nav.map(([id, label]) => `<a href="#${id}" class="${page === id ? "active" : ""}" ${page === id ? 'aria-current="page"' : ""}>${icon(id)}${label}${id === "campaigns" && d.runs.filter((r) => r.status === "blocked").length ? `<span class="count">${d.runs.filter((r) => r.status === "blocked").length}</span>` : ""}</a>`).join("")}</nav><div class="sidebar-bottom"><div class="sync-status"><span class="dot ${paused || !state.online || !d.worker.enabled ? "paused" : ""}"></span>${!state.online ? "Connection interrupted" : paused ? "Workspace paused" : d.worker.enabled ? "Worker connected" : "Worker stopped"}</div><div class="account"><div class="avatar">SC</div><div><strong class="small">${esc(d.facebook?.owner || "Workspace owner")}</strong><p class="muted small">Administrator</p></div><button class="icon-btn" data-action="password" aria-label="Account settings">${icon("key", 16)}</button></div></div></aside><div class="main-wrap"><div class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="menu" aria-label="Toggle navigation" aria-expanded="false">${icon("menu")}</button><span>Workspace</span><span>/</span><strong>${nav.find((n) => n[0] === page)[1]}</strong></div><div class="top-actions"><select aria-label="Filter by brand" id="brand-filter"><option value="">All brands</option>${d.brands.map((b) => `<option value="${esc(b.id)}" ${state.brand === b.id ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select><span class="divider"></span><button class="icon-btn" data-action="refresh" aria-label="Refresh workspace">${icon("refresh", 16)}</button>${btn(paused ? "Resume workspace" : "Pause all", paused ? "resume-all" : "pause-all", "", paused ? "soft" : "", "" + (paused ? "play" : "pause"))}</div></div><main id="main" tabindex="-1">${d.facebook?.status === "reconnect_required" ? `<div class="notice warn">${icon("connections")}<span>${esc(d.facebook.reason)} Existing Meta delivery may continue until pause requests are confirmed.</span><button class="btn tiny" data-action="facebook-connect">Reconnect</button></div>` : ""}${paused ? `<div class="notice warn">${icon("pause")}<span>${d.settings.emergencyPending ? "Pause requests are still being retried with Meta. Delivery may continue until Meta confirms them." : "The workspace is paused. Resume it and enable a brand to continue autonomous work."}</span></div>` : ""}${!state.online ? `<div class="notice error">${icon("info")}Connection interrupted. Showing the last received data.</div>` : ""}${{ overview, brands, campaigns, funnels, creatives, engagement, intelligence, learning, connections }[page]()}<footer class="footer-note"><span>${icon("shield", 12)} Yours to direct. Built to work quietly.</span><span>Spend Control · Meta workspace</span></footer></main></div></div>`;
   app.querySelectorAll("[data-run-detail]").forEach(el => { el.open = expandedRuns.has(el.dataset.runDetail); });
   $(".sidebar").inert = window.innerWidth <= 760;
   if (
@@ -594,6 +600,54 @@ function secret(name, label, help = "") {
     help,
   });
 }
+function facebookPanel() {
+  const f = state.data.facebook;
+  const connected = f.status === "connected";
+  const expiry = [f.expiresAt, f.dataAccessExpiresAt].filter(Boolean).sort((a,b) => a-b)[0];
+  const selected = f.selection;
+  return `<section class="panel connection facebook-connection"><div class="connection-title"><div class="service facebook-mark">f</div><h3>Facebook & Instagram</h3>${badge(connected ? "Connected" : f.status === "reconnect_required" ? "Reconnect needed" : "Not connected", connected ? "green" : "amber")}</div><p>${connected ? `Connected ${f.method === "oauth" ? `as <strong>${esc(f.name)}</strong>` : "with a system-user authorization"}. Choose the assets your workspace can manage.` : "Sign in with Facebook to discover your ad accounts, Pages, and connected Instagram accounts."}</p>${f.reason ? `<div class="notice ${f.status === "reconnect_required" ? "warn" : ""}">${icon("info")}<span>${esc(f.reason)}</span></div>` : ""}<div class="facebook-actions">${f.configured ? btn(f.linked ? "Reconnect Facebook" : "Connect Facebook", "facebook-connect", "", "primary", "connections") : '<a class="btn primary" href="/meta-setup" target="_blank" rel="noopener">Facebook setup guide</a>'}${connected ? btn("Choose accounts & Pages", "discover", "", "", "brands") : ""}</div>${connected ? `<div class="connection-summary"><div><strong>${selected.accountIds.length}</strong><span>Selected accounts</span></div><div><strong>${selected.pageIds.length}</strong><span>Selected Pages</span></div></div>` : ""}${expiry ? `<p class="small muted">Reconnect before ${esc(new Date(expiry).toLocaleDateString(undefined, {year:"numeric",month:"short",day:"numeric"}))}. Background work uses the securely stored authorization.</p>` : ""}${f.method === "oauth" ? `<details class="form-section"><summary>Authorized permissions</summary><div class="permission-list">${Object.entries(f.permissionLabels).map(([key,label]) => `<div><span class="dot ${f.permissions.includes(key) ? "" : "paused"}"></span><span>${esc(label)}</span>${badge(f.permissions.includes(key) ? "Granted" : "Not granted", f.permissions.includes(key) ? "green" : "")}</div>`).join("")}</div><p class="small muted">Available assets depend on the permissions granted to this app and your role in each business.</p></details>` : ""}<details class="form-section" id="facebook-setup" ${!f.configured ? "open" : ""}><summary>One-time app setup</summary><p class="small muted">Register one Meta app for this workspace. Use a Facebook Login for Business configuration that issues a User access token.</p><form data-form="facebook-config"><div class="form-error" role="alert"></div><div class="form-grid">${field("appId","Meta app ID","",{full:true,placeholder:state.data.connections.metaAppId ? "Saved · leave blank to keep" : "App ID"})}${field("appSecret","App secret","",{full:true,type:"password",placeholder:state.data.connections.metaAppSecret ? "Saved securely · leave blank to keep" : "App secret"})}${field("configId","Login configuration ID","",{full:true,placeholder:f.configured ? "Saved · leave blank to keep" : "User access token configuration"})}</div><div class="form-footer"><a class="btn tiny" href="/meta-setup" target="_blank" rel="noopener">Setup guide</a><button class="btn primary">Save app setup</button></div></form><div class="eyebrow mt">Facebook redirect URL</div><div class="code break-url">${esc(f.callbackUrl || "Set APP_ORIGIN on the server first")}</div><p class="small muted">Your app secret stays encrypted on the server.</p></details><details class="form-section"><summary>Advanced: system-user connection</summary><p class="small muted">An alternative for assigned business assets. Facebook can still be used for owner sign-in.</p><form data-form="connections"><div class="form-error" role="alert"></div>${secret("metaToken", "System user access token")}<div class="form-footer"><button class="btn">Save system-user token</button></div></form></details>${connected ? `<div class="form-footer">${btn("Disconnect advertising", "facebook-disconnect", "", "tiny")}</div>` : ""}</section>`;
+}
+function assetPicker(assets) {
+  state.assetInventory = assets;
+  const selected = state.data.facebook.selection;
+  const group = (items, name, ids, headingText) => `<section><div class="asset-heading"><h3>${headingText}</h3><button type="button" class="btn tiny" data-action="select-assets" data-id="${name}">Select all</button></div>${items.length ? items.map(item => `<label class="asset-choice" data-search="${esc(`${item.name || ""} ${item.id}`.toLowerCase())}"><input type="checkbox" name="${name}" value="${esc(item.id)}" ${ids.includes(item.id) ? "checked" : ""}><span><strong>${esc(item.name || item.id)}</strong><small>${esc(item.id)}${item.currency ? ` · ${esc(item.currency)}` : ""}${item.timezone_name ? ` · ${esc(item.timezone_name)}` : ""}${item.instagram_business_account ? ` · Instagram ${esc(item.instagram_business_account.username || item.instagram_business_account.id)}` : ""}</small></span></label>`).join("") : `<p class="muted small">No ${headingText.toLowerCase()} were returned. Check your asset access and Facebook permissions, then reconnect.</p>`}</section>`;
+  modal("Choose your accounts & Pages", "Connect the assets this workspace should manage. This does not start advertising.", `<form data-form="facebook-assets"><div class="form-error" role="alert"></div>${assets.warnings?.length ? `<div class="notice warn"><span>${assets.warnings.map(esc).join("<br>")}</span></div>` : ""}${field("assetSearch","Find an account or Page","",{full:true,placeholder:"Search by name or ID"})}<div class="asset-columns">${group(assets.accounts,"accountIds",selected.accountIds,"Ad accounts")}${group(assets.pages,"pageIds",selected.pageIds,"Facebook Pages")}</div>${assets.businesses?.length ? `<p class="small muted mt">Business portfolios: ${assets.businesses.map(b=>esc(b.name || b.id)).join(", ")}</p>` : ""}<div class="form-footer">${btn("Cancel","close")}<button class="btn primary">Save selected assets</button></div></form>`);
+}
+function assetOptions(items, selected, label) {
+  const options = [["",label],...items.map(a=>[a.id,`${a.name || a.username || a.id} · ${a.id}`])];
+  if (selected && !items.some(a=>a.id===selected)) options.push([selected,`${selected} · check access`]);
+  return options;
+}
+function brandAssetFields(v,dest) {
+  const f = state.data.facebook, assets = state.data.metaAssets;
+  if (!assets) return `${field("pageId","Facebook Page ID",v.pageId,{help:"Connect Facebook to choose Pages by name. Optional in simulation."})}${field("adAccountId","Ad account ID",v.adAccountId,{placeholder:"act_123456789"})}${field("instagramUserId","Instagram account ID",v.instagramUserId)}${field("pixelId","Pixel / dataset ID",dest.pixelId)}`;
+  const accounts = assets.accounts.filter(a=>f.method!=="oauth" || f.selection.accountIds.includes(a.id));
+  const pages = assets.pages.filter(a=>f.method!=="oauth" || f.selection.pageIds.includes(a.id));
+  return `${field("adAccountId","Ad account",v.adAccountId,{options:assetOptions(accounts,v.adAccountId,"Choose an ad account")})}${field("pageId","Facebook Page",v.pageId,{options:assetOptions(pages,v.pageId,"Choose a Page")})}${field("instagramUserId","Instagram account",v.instagramUserId,{options:assetOptions(pages.flatMap(p=>p.instagram_business_account ? [p.instagram_business_account] : []),v.instagramUserId,"No Instagram account")})}${field("pixelId","Pixel / dataset",dest.pixelId,{options:assetOptions([],dest.pixelId,"Choose an account to load pixels")})}<div class="field full"><button type="button" class="btn tiny" data-action="brand-assets">Refresh connected assets</button><p class="small muted" id="brand-asset-status" role="status">Your account currency and timezone update when you choose an account. Review the budget before saving.</p></div>`;
+}
+async function loadBrandAssets(form) {
+  const account = form.elements.adAccountId.value, page = form.elements.pageId.value;
+  const status = $("#brand-asset-status", form);
+  if (!account || !state.data.metaAssets) return;
+  if (status) status.textContent = "Loading connected assets…";
+  try {
+    const result = await api(`/meta/assets/details?account=${encodeURIComponent(account)}&page=${encodeURIComponent(page)}`);
+    if (!form.isConnected || form.elements.adAccountId.value !== account || form.elements.pageId.value !== page) return;
+    for (const [name,items,label] of [["pixelId",result.pixels,"No pixel selected"],["instagramUserId",result.instagram,"No Instagram account"],["leadFormId",result.forms,"Create a new form / no form selected"]]) {
+      const old = form.elements[name];
+      const value = old.value;
+      const select = document.createElement("select"); select.name = name; select.id = old.id;
+      select.innerHTML = assetOptions(items,value,label).map(([id,text])=>`<option value="${esc(id)}" ${id===value ? "selected" : ""}>${esc(text)}</option>`).join("");
+      old.replaceWith(select);
+    }
+    if (status) status.textContent = result.warnings.length ? result.warnings.join(" ") : `${result.pixels.length} pixels, ${result.instagram.length} Instagram accounts, ${result.forms.length} lead forms, ${result.audiences.length} audiences, and ${result.apps.length} apps available.`;
+  } catch (error) { if (status) status.textContent = error.message; }
+}
+async function startFacebook(intent, details = {}) {
+  const result = await api("/meta/oauth/start", "POST", {intent,...details});
+  location.assign(result.url);
+}
+
 function connections() {
   const d = state.data,
     s = d.settings,
@@ -604,7 +658,7 @@ function connections() {
       "A few considered connections power the whole workflow.",
       btn("Check connections", "check-connections", "", "", "shield"),
     ) +
-    `<div class="connection-grid"><form class="panel connection" data-form="connections"><div class="connection-title"><div class="service">∞</div><h3>Meta</h3>${badge(c.metaToken ? "Credentials saved" : "Not connected", c.metaToken ? "green" : "")}</div><p>Use a system user assigned to your ad account, Facebook Page, and pixel. Set an account spending limit in Meta before enabling live delivery.</p><div class="form-error" role="alert"></div><div class="form-grid">${secret("metaAppId", "App ID")}${secret("metaAppSecret", "App secret")}${secret("metaToken", "System user access token")}</div><div class="form-footer">${btn("Discover assets", "discover", "", "tiny", "eye")}<button class="btn primary">Save Meta connection</button></div><div class="secret-note">${icon("shield", 12)} Credentials stay on the server, encrypted at rest.</div></form><form class="panel connection" data-form="connections"><div class="connection-title"><div class="service">${icon("spark", 22)}</div><h3>OpenAI</h3>${badge(c.openaiKey ? "Credentials saved" : "Not connected", c.openaiKey ? "green" : "")}</div><p>Writes grounded scripts, produces narration, and reviews the rendered films against the brand brief.</p><div class="form-error" role="alert"></div><div class="form-grid">${secret("openaiKey", "API key")}${field("textModel", "Text & vision model", s.textModel, { full: true, required: true })}${field("textInputUsdPerMillion", "Input price / 1M tokens (USD)", s.textInputUsdPerMillion, { type: "number", min: 0.01, step: ".01" })}${field("textOutputUsdPerMillion", "Output price / 1M tokens (USD)", s.textOutputUsdPerMillion, { type: "number", min: 0.01, step: ".01" })}</div><div class="form-footer"><button class="btn primary">Save OpenAI connection</button></div><div class="secret-note">${icon("info", 12)} Keep model rates current for production cost reservations.</div></form><form class="panel connection" data-form="connections"><div class="connection-title"><div class="service">${icon("creatives", 21)}</div><h3>Video generation</h3>${badge(c[s.provider === "seedance" ? "seedanceKey" : "googleServiceAccount"] ? "Credentials saved" : "Not connected", c[s.provider === "seedance" ? "seedanceKey" : "googleServiceAccount"] ? "green" : "")}</div><p>Choose Seedance or Google Veo. Production is limited by each brand’s daily USD allowance.</p><div class="form-error" role="alert"></div><div class="form-grid">${field(
+    `<div class="connection-grid">${facebookPanel()}${engagementConnections()}<form class="panel connection" data-form="connections"><div class="connection-title"><div class="service">${icon("spark", 22)}</div><h3>OpenAI</h3>${badge(c.openaiKey ? "Credentials saved" : "Not connected", c.openaiKey ? "green" : "")}</div><p>Writes grounded scripts, produces narration, and reviews the rendered films against the brand brief.</p><div class="form-error" role="alert"></div><div class="form-grid">${secret("openaiKey", "API key")}${field("textModel", "Text & vision model", s.textModel, { full: true, required: true })}${field("textInputUsdPerMillion", "Input price / 1M tokens (USD)", s.textInputUsdPerMillion, { type: "number", min: 0.01, step: ".01" })}${field("textOutputUsdPerMillion", "Output price / 1M tokens (USD)", s.textOutputUsdPerMillion, { type: "number", min: 0.01, step: ".01" })}</div><div class="form-footer"><button class="btn primary">Save OpenAI connection</button></div><div class="secret-note">${icon("info", 12)} Keep model rates current for production cost reservations.</div></form><form class="panel connection" data-form="connections"><div class="connection-title"><div class="service">${icon("creatives", 21)}</div><h3>Video generation</h3>${badge(c[s.provider === "seedance" ? "seedanceKey" : "googleServiceAccount"] ? "Credentials saved" : "Not connected", c[s.provider === "seedance" ? "seedanceKey" : "googleServiceAccount"] ? "green" : "")}</div><p>Choose Seedance or Google Veo. Production is limited by each brand’s daily USD allowance.</p><div class="form-error" role="alert"></div><div class="form-grid">${field(
       "provider",
       "Provider",
       s.provider,
@@ -642,7 +696,7 @@ function brandForm(id = "") {
           ["LIVE", "Live · autonomous delivery"],
         ],
       },
-    )}${field("countries", "Countries", v.countries?.join(", ") ?? "US", { required: true, help: "Two-letter codes separated by commas." })}</div></section><section class="form-section"><h3>02 / Boundaries & budget</h3><div class="form-grid">${field("currency", "Account currency", curr, { required: true, help: "Use the currency of the connected ad account." })}${field("timezone", "Account timezone", v.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone, { required: true })}${field("dailyBudget", "Daily advertising budget", sp.dailyBudgetMinor / o || 100, { required: true, type: "number", min: 0.01, step: ".01" })}${field("maxBudget", "Maximum combined daily budget", sp.maxDailyBudgetMinor / o || 200, { required: true, type: "number", min: 0.01, step: ".01", help: "Limits the configured budgets across managed campaigns. Meta can spend more than a daily budget on an individual day." })}${field("targetCpa", "Target cost per result", sp.targetCpaMinor / o || 20, { required: true, type: "number", min: 0.01, step: ".01" })}${field("generationDailyUsd", "Daily production allowance (USD)", v.generationDailyUsd ?? 15, { required: true, type: "number", min: 0.1, step: ".1" })}${field("lifetimeLimit", "Stop at reported total spend", v.lifetimeLimitMinor / o || 0, { type: "number", min: 0, step: ".01", help: "0 disables this observed-spend stop. Reporting delay can cause overshoot; the Meta account cap is the hard backstop." })}${field("creativesPerCycle", "Creatives per funnel stage", v.creativesPerCycle ?? 3, { options: [1, 2, 3, 4, 5, 6] })}${field("approved", "Approved claims", (claims.substantiated ?? []).join("\n"), { area: true, full: true, required: true, help: "One factual, substantiated claim per line. The creative writer stays within these claims." })}${field("neverSay", "Never say", (claims.neverSay ?? []).join("\n"), { area: true })}${field("neverShow", "Never show", (claims.neverShow ?? []).join("\n"), { area: true })}${field("specialAdCategories", "Special ad category", v.specialAdCategories?.[0] ?? "NONE", { options: ["NONE", "HOUSING", "EMPLOYMENT", "CREDIT", "FINANCIAL_PRODUCTS_SERVICES", "ISSUES_ELECTIONS_POLITICS", "ONLINE_GAMBLING_AND_GAMING"], full: true })}</div></section><section class="form-section"><h3>03 / Where people go</h3><div class="form-grid">${field("url", "Website / destination URL", dest.url, { type: "url", full: true, placeholder: "https://your-brand.com/product" })}${field("pageId", "Facebook Page ID", v.pageId, { help: "Optional in simulation." })}${field("adAccountId", "Ad account ID", v.adAccountId, { placeholder: "act_123456789" })}${field("instagramUserId", "Instagram account ID", v.instagramUserId)}${field("pixelId", "Pixel / dataset ID", dest.pixelId)}${field("customEventType", "Conversion event", dest.customEventType ?? "PURCHASE", { options: ["PURCHASE", "LEAD", "COMPLETE_REGISTRATION", "CONTACT", "SUBSCRIBE", "ADD_TO_CART", "VIEW_CONTENT"] })}${field("leadFormId", "Existing lead form ID", dest.leadFormId)}${field("privacyPolicyUrl", "Privacy policy URL", v.privacyPolicyUrl, { type: "url", full: true, help: "Required to create a new Meta lead form automatically." })}${field("productImage", "Product reference image URL", v.productImage, { type: "url", full: true, help: "A public HTTPS image of your actual product." })}${field("websiteDescription", "Destination context", v.websiteDescription, { area: true, full: true, help: "Describe what visitors will find after clicking the ad." })}</div></section><details class="form-section"><summary>04 / Funnel & audience history</summary><div class="form-grid">${field("funnel", "Funnel strategy", v.funnel ?? "auto", { full: true, options: [["auto", "Recommend for my brand"], ...Object.values(state.data.funnels).map((f) => [f.id, f.name])] })}${field(
+    )}${field("countries", "Countries", v.countries?.join(", ") ?? "US", { required: true, help: "Two-letter codes separated by commas." })}</div></section><section class="form-section"><h3>02 / Boundaries & budget</h3><div class="form-grid">${field("currency", "Account currency", curr, { required: true, help: "Use the currency of the connected ad account." })}${field("timezone", "Account timezone", v.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone, { required: true })}${field("dailyBudget", "Daily advertising budget", sp.dailyBudgetMinor / o || 100, { required: true, type: "number", min: 0.01, step: ".01" })}${field("maxBudget", "Maximum combined daily budget", sp.maxDailyBudgetMinor / o || 200, { required: true, type: "number", min: 0.01, step: ".01", help: "Limits the configured budgets across managed campaigns. Meta can spend more than a daily budget on an individual day." })}${field("targetCpa", "Target cost per result", sp.targetCpaMinor / o || 20, { required: true, type: "number", min: 0.01, step: ".01" })}${field("generationDailyUsd", "Daily production allowance (USD)", v.generationDailyUsd ?? 15, { required: true, type: "number", min: 0.1, step: ".1" })}${field("lifetimeLimit", "Stop at reported total spend", v.lifetimeLimitMinor / o || 0, { type: "number", min: 0, step: ".01", help: "0 disables this observed-spend stop. Reporting delay can cause overshoot; the Meta account cap is the hard backstop." })}${field("creativesPerCycle", "Creatives per funnel stage", v.creativesPerCycle ?? 3, { options: [1, 2, 3, 4, 5, 6] })}${field("approved", "Approved claims", (claims.substantiated ?? []).join("\n"), { area: true, full: true, required: true, help: "One factual, substantiated claim per line. The creative writer stays within these claims." })}${field("neverSay", "Never say", (claims.neverSay ?? []).join("\n"), { area: true })}${field("neverShow", "Never show", (claims.neverShow ?? []).join("\n"), { area: true })}${field("specialAdCategories", "Special ad category", v.specialAdCategories?.[0] ?? "NONE", { options: ["NONE", "HOUSING", "EMPLOYMENT", "CREDIT", "FINANCIAL_PRODUCTS_SERVICES", "ISSUES_ELECTIONS_POLITICS", "ONLINE_GAMBLING_AND_GAMING"], full: true })}</div></section><section class="form-section"><h3>03 / Where people go</h3><div class="form-grid">${field("url", "Website / destination URL", dest.url, { type: "url", full: true, placeholder: "https://your-brand.com/product" })}${brandAssetFields(v,dest)}${field("customEventType", "Conversion event", dest.customEventType ?? "PURCHASE", { options: ["PURCHASE", "LEAD", "COMPLETE_REGISTRATION", "CONTACT", "SUBSCRIBE", "ADD_TO_CART", "VIEW_CONTENT"] })}${field("leadFormId", "Existing lead form ID", dest.leadFormId)}${field("privacyPolicyUrl", "Privacy policy URL", v.privacyPolicyUrl, { type: "url", full: true, help: "Required to create a new Meta lead form automatically." })}${field("productImage", "Product reference image URL", v.productImage, { type: "url", full: true, help: "A public HTTPS image of your actual product." })}${field("websiteDescription", "Destination context", v.websiteDescription, { area: true, full: true, help: "Describe what visitors will find after clicking the ad." })}</div></section><details class="form-section"><summary>04 / Funnel & audience history</summary><div class="form-grid">${field("funnel", "Funnel strategy", v.funnel ?? "auto", { full: true, options: [["auto", "Recommend for my brand"], ...Object.values(state.data.funnels).map((f) => [f.id, f.name])] })}${field(
       "assets",
       "Existing audience signal",
       v.assets ?? "nothing",
@@ -724,11 +778,24 @@ function funnelDetail(id) {
 async function refresh(show = false) {
   const d = await api("/bootstrap");
   state.data = d;
+  if(currentPage()==="engagement")state.commentsKey="";
   state.online = true;
   if (show) toast("Workspace updated.");
   render();
 }
 async function action(name, id, el) {
+  if(name === "engagement-settings"){engagementSettings(id);return;}
+  if(name === "engagement-subscribe"){await api(`/engagement/${id}/subscribe`,"POST",{});toast("Facebook comment notifications enabled.");return;}
+  if(name === "engagement-sync"){await api(`/engagement/${id}/sync`,"POST",{});toast("Comment and destination checks queued.");return;}
+  if(name === "reply-rule-add"){$("#reply-rules").insertAdjacentHTML("beforeend",replyRuleFields({},Date.now()));return;}
+  if(name === "reply-rule-remove"){el.closest("[data-rule]").remove();return;}
+  if(name === "comment-open"){commentDetail(id);return;}
+  if(name === "comment-reload"){await loadComments();return;}
+  if(name === "comment-more"){await loadComments(true);return;}
+  if(name === "comment-dismiss" || name === "comment-draft"){await api(`/comments/${id}/${name === "comment-draft" ? "draft" : "dismiss"}`,"POST",{});dialog.close();await refresh();toast(name === "comment-draft" ? "A new AI draft is queued." : "Conversation closed.");return;}
+  if(name === "knowledge-open"){knowledgeDetail(id);return;}
+  if(name === "knowledge-refresh"){await api(`/knowledge/${id}/refresh`,"POST",{});dialog.close();toast("Page refresh queued.");return;}
+
   if (name === "close") {
     dialog.close();
     return;
@@ -916,13 +983,24 @@ async function action(name, id, el) {
     return;
   }
   if (name === "discover") {
-    const r = await api("/assets");
-    modal(
-      "Your Meta assets",
-      "Use these IDs when configuring each brand.",
-      `<h3>Ad accounts</h3>${r.accounts.length ? r.accounts.map((a) => `<div class="list-row"><div class="list-text"><strong>${esc(a.name)}</strong><p>${esc(a.id)} · ${esc(a.currency)} · ${esc(a.timezone_name)}</p></div></div>`).join("") : '<p class="muted small">No ad accounts are assigned to this system user.</p>'}<h3 class="mt">Facebook Pages</h3>${r.pages.map((p) => `<div class="list-row"><div class="list-text"><strong>${esc(p.name)}</strong><p>Page: ${esc(p.id)}${p.instagram_business_account ? ` · Instagram: ${esc(p.instagram_business_account.id)}` : ""}</p></div></div>`).join("")}`,
-    );
+    const assets = await api("/assets");
+    await refresh();
+    assetPicker(assets);
     return;
+  }
+  if (name === "select-assets") {
+    for (const input of $$(`input[name="${id}"]`, dialog)) if (!input.closest(".asset-choice").hidden) input.checked = true;
+    return;
+  }
+  if (name === "facebook-connect") { await startFacebook("connect"); return; }
+  if (name === "facebook-login") { await startFacebook("login"); return; }
+  if (name === "brand-assets") { await loadBrandAssets(el.closest("form")); return; }
+  if (name === "facebook-disconnect") {
+    modal("Disconnect advertising?", "The workspace will pause its managed campaigns before removing the advertising connection.", `<p class="small muted">Facebook owner sign-in stays linked. Existing campaigns must be confirmed paused before the connection can be removed.</p><div class="form-error" role="alert"></div><div class="form-footer">${btn("Cancel","close")}${btn("Pause & disconnect","facebook-disconnect-confirm","","primary")}</div>`,true);
+    return;
+  }
+  if (name === "facebook-disconnect-confirm") {
+    await api("/meta/disconnect","POST",{}); dialog.close(); await refresh(); toast("Advertising disconnected. Your workspace is paused."); return;
   }
   if (name === "select-funnel") {
     const b = brandBy(state.funnelBrand);
@@ -934,12 +1012,8 @@ async function action(name, id, el) {
     return;
   }
   if (name === "password") {
-    modal(
-      "Workspace access",
-      "Change your password or sign out of this device.",
-      `<form data-form="password"><div class="form-error" role="alert"></div><div class="form-grid">${field("current", "Current password", "", { type: "password", required: true, full: true })}${field("password", "New password", "", { type: "password", required: true, full: true, help: "At least 12 characters." })}</div><div class="form-footer">${btn("Sign out", "logout", "", "", "logout")}<button class="btn primary">Update password</button></div></form>`,
-      true,
-    );
+    const f=state.data.facebook;
+    modal("Workspace access", "Facebook sign-in and owner recovery.", `<div class="access-identity"><div class="service facebook-mark">f</div><div><strong>${esc(f.owner || "Facebook sign-in is not linked")}</strong><p class="small muted">${f.linked ? "Only this linked Facebook account can open the workspace." : "Link Facebook to sign in without entering a workspace password."}</p></div></div>${f.configured ? btn(f.linked ? "Reconnect Facebook" : "Link Facebook sign-in","facebook-connect","","soft") : '<a class="btn" href="#connections" data-action="close">Set up Facebook login</a>'}<details class="form-section mt"><summary>${f.recoveryPassword ? "Change recovery password" : "Add a recovery password"}</summary><form data-form="password"><div class="form-error" role="alert"></div><div class="form-grid">${f.recoveryPassword ? field("current","Current password","",{type:"password",required:true,full:true}) : ""}${field("password","New recovery password","",{type:"password",required:true,full:true,help:"At least 12 characters. Keep this for account recovery."})}</div><div class="form-footer"><button class="btn primary">Save recovery password</button></div></form></details><div class="form-footer">${btn("Sign out","logout","","","logout")}</div>`,true);
     return;
   }
   if (name === "logout") {
@@ -967,6 +1041,18 @@ document.addEventListener("click", async (e) => {
   }
 });
 document.addEventListener("change", (e) => {
+  if(e.target.id === "comment-filter"){state.commentFilter=e.target.value;state.comments=null;render();}
+  if(e.target.name === "replyProvider"){e.target.form.elements.replyModel.innerHTML=state.data.engagement.models[e.target.value].map(m=>`<option>${esc(m)}</option>`).join("");}
+
+  if (["adAccountId","pageId"].includes(e.target.name) && e.target.form?.dataset.form === "brand") {
+    const form=e.target.form;
+    if (e.target.name === "adAccountId") {
+      const account=state.data.metaAssets?.accounts.find(a=>a.id===e.target.value);
+      if(account){form.elements.currency.value=account.currency;form.elements.timezone.value=account.timezone_name;}
+      form.elements.pixelId.value="";
+    } else { form.elements.leadFormId.value=""; form.elements.instagramUserId.value=""; }
+    void loadBrandAssets(form);
+  }
   if (e.target.id === "brand-filter") {
     state.brand = e.target.value;
     if (state.brand) state.currency = brandBy(state.brand).currency;
@@ -1000,6 +1086,10 @@ document.addEventListener("change", (e) => {
   }
 });
 document.addEventListener("input", (e) => {
+  if(e.target.name === "assetSearch") {
+    const query=e.target.value.toLowerCase().trim();
+    for(const row of $$(".asset-choice",dialog)) row.hidden=!row.dataset.search.includes(query);
+  }
   if (
     e.target.name === "name" &&
     e.target.form?.dataset.form === "brand" &&
@@ -1022,6 +1112,22 @@ document.addEventListener("submit", async (e) => {
   if (submit) submit.disabled = true;
   const values = Object.fromEntries(new FormData(form));
   try {
+    if(form.dataset.form === "engagement"){
+      const rules=$$("[data-rule]",form).map(row=>({label:$("input",row).value,questions:$("textarea",row).value.split("\n").map(s=>s.trim()).filter(Boolean),reply:$$("textarea",row)[1].value})).filter(r=>r.label||r.questions.length||r.reply);
+      await api(`/engagement/${form.dataset.id}`,"POST",{mode:values.engagementMode,dailyLimit:Number(values.dailyLimit),aiEnabled:form.elements.aiEnabled.checked,provider:values.replyProvider,model:values.replyModel,aiDailyLimit:Number(values.aiDailyLimit),knowledgeUrls:values.knowledgeUrls.split("\n").map(s=>s.trim()).filter(Boolean),rules});dialog.close();await refresh();toast("Engagement settings saved.");
+    }
+    if(form.dataset.form === "comment-reply"){await api(`/comments/${form.dataset.id}/approve`,"POST",{reply:values.reply});dialog.close();await refresh();toast("Public reply approved and queued.");}
+    if (form.dataset.form === "facebook-config") {
+      await api("/meta/config","POST",values); await refresh(); toast("Facebook app setup saved.");
+    }
+    if (form.dataset.form === "facebook-assets") {
+      const selected=new FormData(form);
+      await api("/meta/assets/select","POST",{accountIds:selected.getAll("accountIds"),pageIds:selected.getAll("pageIds")});
+      dialog.close(); await refresh(); toast("Selected accounts and Pages saved.");
+    }
+    if (["facebook-setup","facebook-recover"].includes(form.dataset.form)) {
+      await startFacebook(form.dataset.form === "facebook-setup" ? "setup" : "recover",{token:values.token,config:{appId:values.appId,appSecret:values.appSecret,configId:values.configId}});
+    }
     if (form.dataset.form === "auth") {
       const r = await api(state.setup ? "/setup" : "/login", "POST", values);
       state.csrf = r.csrf;
@@ -1111,6 +1217,9 @@ document.addEventListener("submit", async (e) => {
         "metaAppId",
         "metaAppSecret",
         "metaToken",
+        "minimaxKey",
+        "glmKey",
+        "metaWebhookVerifyToken",
         "openaiKey",
         "seedanceKey",
         "googleServiceAccount",
@@ -1142,7 +1251,8 @@ document.addEventListener("submit", async (e) => {
       const r = await api("/password", "POST", values);
       state.csrf = r.csrf;
       dialog.close();
-      toast("Password updated. Other sessions have been signed out.");
+      await refresh();
+      toast("Recovery password saved. Other sessions have been signed out.");
     }
   } catch (err) {
     error.textContent = err.message;
@@ -1151,16 +1261,30 @@ document.addEventListener("submit", async (e) => {
     if (submit) submit.disabled = false;
   }
 });
-function authPage(setup) {
+function authPage(setup, facebook = state.facebookSession || {}) {
   state.setup = setup;
-  app.innerHTML = `<div class="auth-page"><aside class="auth-story"><div class="logo"><img src="/mark.svg" alt="">Spend Control</div><div class="auth-copy"><div class="eyebrow">A more considered approach</div><h1>Less noise.<br>More direction.</h1><p>A quiet workspace for advertising that learns, adapts, and moves your business forward.</p><div class="auth-art" aria-hidden="true"><div class="auth-block"></div><div class="auth-block b"><div class="abstract-line"></div><div class="abstract-line short"></div></div><div class="auth-block c"></div></div></div><p class="auth-story-foot">Designed for clarity. Built for the everyday.</p></aside><main class="auth-form-wrap" id="main"><form class="auth-form" data-form="auth"><div class="eyebrow">Your workspace awaits</div><h2 class="mt">${setup ? "Make yourself at home." : "Welcome back."}</h2><p>${setup ? "Create your owner account to get started." : "A clear view of your advertising is just ahead."}</p><div class="form-error" role="alert"></div>${setup ? field("token", "Workspace setup token", "", { required: true, type: "password", help: "Use the token created on your server during installation." }) : ""}${field("password", setup ? "Choose a password" : "Password", "", { required: true, type: "password", help: setup ? "Use at least 12 characters." : "" })}<button class="btn primary">${setup ? "Create workspace" : "Open workspace"}${icon("arrow", 15)}</button><p class="auth-help">${icon("shield", 13)} Owner access. Credentials stay in your workspace.</p></form></main></div>`;
+  state.facebookSession = facebook;
+  const appFields = `${field("appId","Meta app ID","",{required:!facebook.configured,placeholder:facebook.configured ? "Saved · leave blank to keep" : "Your Meta app ID"})}${field("appSecret","Meta app secret","",{type:"password",required:!facebook.configured,placeholder:facebook.configured ? "Saved securely" : "Your Meta app secret"})}${field("configId","Facebook Login configuration ID","",{required:!facebook.configured,help:"Choose a User access token configuration."})}`;
+  const connectForm = (recover=false) => `<form data-form="${recover ? "facebook-recover" : "facebook-setup"}"><div class="form-error" role="alert"></div>${field("token","Workspace setup token","",{required:true,type:"password",help:"Use the token on your server to verify that you own this workspace."})}${!facebook.configured ? appFields : ""}<button class="btn primary">${recover ? "Recover with Facebook" : "Continue with Facebook"}${icon("arrow",15)}</button></form>`;
+  const passwordForm = `<form data-form="auth"><div class="form-error" role="alert"></div>${setup ? field("token","Workspace setup token","",{required:true,type:"password"}) : ""}${field("password",setup ? "Recovery password" : "Password","",{required:true,type:"password",help:setup ? "Use at least 12 characters." : ""})}<button class="btn ${setup ? "" : "primary"}">${setup ? "Set up with a password" : "Open workspace"}${icon("arrow",15)}</button></form>`;
+  app.innerHTML = `<div class="auth-page"><aside class="auth-story"><div class="logo"><img src="/mark.svg" alt="">Spend Control</div><div class="auth-copy"><div class="eyebrow">A more considered approach</div><h1>Less noise.<br>More direction.</h1><p>A quiet workspace for advertising that learns, adapts, and moves your business forward.</p><div class="auth-art" aria-hidden="true"><div class="auth-block"></div><div class="auth-block b"><div class="abstract-line"></div><div class="abstract-line short"></div></div><div class="auth-block c"></div></div></div><p class="auth-story-foot">Designed for clarity. Built for the everyday.</p></aside><main class="auth-form-wrap" id="main"><div class="auth-form"><div class="eyebrow">Your workspace awaits</div><h2 class="mt">${setup ? "One connection.<br>A clearer view." : "Welcome back."}</h2><p>${setup ? "Connect Facebook to bring your advertising accounts and Pages into one workspace." : "Sign in to your advertising workspace."}</p>${state.facebookError ? `<div class="notice warn"><span>${esc(state.facebookError)}</span></div>` : ""}${setup ? connectForm() + `<details class="auth-alternative"><summary>Use a workspace password instead</summary>${passwordForm}</details>` : facebook.configured && facebook.linked ? `<button class="btn primary facebook-login" data-action="facebook-login"><span class="facebook-mark">f</span>Continue with Facebook${icon("arrow",15)}</button>${facebook.recoveryPassword ? `<details class="auth-alternative"><summary>Use recovery password</summary>${passwordForm}</details>` : ""}` : facebook.recoveryPassword ? passwordForm : `<p class="small muted">Facebook access was removed. Verify workspace ownership to reconnect.</p>${connectForm(true)}`}${!setup && (facebook.linked || facebook.recoveryPassword) ? `<details class="auth-alternative"><summary>Recover owner access</summary>${connectForm(true)}</details>` : ""}<p class="auth-help">${icon("shield",13)} Your Facebook password is entered only on Facebook.</p><div class="auth-links"><a href="/privacy">Privacy</a><a href="/data-deletion">Data removal</a><a href="/meta-setup">Setup guide</a></div></div></main></div>`;
 }
 async function init() {
   try {
     const s = await api("/session");
     state.csrf = s.csrf;
+    state.facebookSession = s.facebook;
+    const query = new URLSearchParams(location.search);
+    state.facebookError = query.get("facebook") === "error" ? query.get("message") || "Facebook connection could not be completed." : "";
+    const justConnected = query.get("facebook") === "connected";
+    if (query.has("facebook")) history.replaceState(null,"",location.pathname + location.hash);
     if (s.authenticated) await refresh();
-    else authPage(s.setupRequired);
+    else authPage(s.setupRequired, s.facebook);
+    if (s.authenticated && justConnected) {
+      toast("Facebook connected. Choose the assets this workspace should manage.");
+      try { const assets=await api("/assets"); await refresh(); assetPicker(assets); }
+      catch(error) { toast(error.message,true); }
+    }
   } catch (e) {
     app.innerHTML = `<main class="screen-error"><h1>We couldn’t open the workspace.</h1><p class="muted mt">${esc(e.message)}</p><button class="btn primary mt" data-action="refresh">Try again</button></main>`;
   }
@@ -1210,3 +1334,48 @@ document.addEventListener("keydown", (event) => {
   }
 });
 void init();
+
+function engagementSettings(id) {
+  const b=brandBy(id), c=state.data.engagement.configs.find(c=>c.id===id) || {mode:"off",dailyLimit:50,aiEnabled:true,provider:"glm",model:"glm-5.2",aiDailyLimit:100,knowledgeUrls:[],rules:[]};
+  modal(`${b.name} · Engagement`,"Give every conversation the right context and next step.",`<form data-form="engagement" data-id="${esc(id)}"><div class="form-error" role="alert"></div><section class="form-section"><div class="form-grid">${field("engagementMode","Reply mode",c.mode,{options:[["off","Off"],["review","Collect comments & draft for review"],["auto","Publish approved and verified AI replies"]],full:true})}${field("dailyLimit","Public replies per day",c.dailyLimit,{type:"number",min:1,step:"1",help:"A separate limit from advertising spend."})}${field("aiDailyLimit","AI requests per day",c.aiDailyLimit,{type:"number",min:1,step:"1",help:"Page profiles and reply checks share this allowance."})}</div><p class="small muted mt">Automatic publishing requires a live brand. Older comments remain in review when you turn it on. Pause all stops public replies.</p></section><section class="form-section"><h3>Page intelligence</h3><label class="toggle-line"><input type="checkbox" name="aiEnabled" ${c.aiEnabled ? "checked" : ""}> Read ad destinations and draft contextual replies</label><div class="form-grid">${field("replyProvider","Reply provider",c.provider,{options:[["glm","Z.AI · GLM"],["minimax","MiniMax"]]})}${field("replyModel","Reply model",c.model,{options:state.data.engagement.models[c.provider]})}${field("knowledgeUrls","Additional knowledge pages",c.knowledgeUrls.join("\n"),{area:true,full:true,rows:3,placeholder:"https://your-brand.com/faq",help:"One public HTTPS URL per line. Ad destination pages are discovered automatically. Add useful FAQ, delivery, or product pages."})}</div><p class="small muted">Drafts use the relevant landing page, ad copy, and approved facts. Questions that lack a supported answer enter review. People are invited to message or complete the form according to the ad.</p></section><section class="form-section"><h3>Approved answers</h3><p class="small muted">Optional shortcuts and brand knowledge. Exact example questions can use these replies directly.</p><div id="reply-rules">${c.rules.map((r,i)=>replyRuleFields(r,i)).join("")}</div>${btn("Add approved answer","reply-rule-add","","tiny","plus")}</section><div class="form-footer">${c.mode!=="off" ? btn("Enable Facebook notifications","engagement-subscribe",id,"tiny") : ""}${btn("Cancel","close")}<button class="btn primary">Save engagement settings</button></div></form>`);
+}
+function replyRuleFields(r={},i=0){return `<div class="reply-rule" data-rule><div class="form-grid">${field(`ruleLabel${i}`,"Answer label",r.label||"",{full:true,placeholder:"Product care"})}${field(`ruleQuestions${i}`,"Example questions",(r.questions||[]).join("\n"),{area:true,full:true,help:"One complete question per line."})}${field(`ruleReply${i}`,"Approved reply",r.reply||"",{area:true,full:true})}</div><button type="button" class="btn tiny" data-action="reply-rule-remove">Remove answer</button></div>`;}
+async function loadComments(more=false) {
+  const queryKey=`${state.brand}:${state.commentFilter||"attention"}`;
+  if(state.commentsLoading)return;
+  state.commentsLoading=true;const request=++state.commentRequest;
+  try{
+    const result=await api(`/engagement/comments?brand=${encodeURIComponent(state.brand)}&status=${encodeURIComponent(state.commentFilter||"attention")}&offset=${more ? state.comments?.nextOffset||0 : 0}`);
+    if(request!==state.commentRequest || queryKey!==`${state.brand}:${state.commentFilter||"attention"}`)return;
+    state.commentsError="";state.comments=more ? {...result,items:[...state.comments.items,...result.items]} : result;state.commentsKey=queryKey;
+  }catch(error){state.commentsError=error.message;state.commentsKey=queryKey;state.comments={items:[],total:0,nextOffset:null};}
+  finally{state.commentsLoading=false;if(currentPage()==="engagement")render();}
+}
+function engagement() {
+  const data=state.data.engagement, count=data.counts, threads=data.threads.filter(t=>!state.brand||t.brandId===state.brand), brands=state.data.brands.filter(b=>!state.brand||b.id===state.brand);
+  const attention=(count.review||0)+(count.failed||0)+(count.uncertain||0), replies=(count.replied||0)+(count.answered||0), stale=threads.filter(t=>t.error||!t.lastSyncedAt||Date.parse(t.lastSyncedAt)<Date.now()-15*60000);
+  const queryKey=`${state.brand}:${state.commentFilter||"attention"}`;
+  if((!state.comments || state.commentsKey!==queryKey)&&!state.commentsLoading)void loadComments();
+  const rows=state.comments?.items||[];
+  return heading("A conversation, kept going.","Helpful answers with the context of each ad and its landing page.",'<a class="btn" href="#intelligence">Page intelligence '+icon("arrow",15)+'</a>',"Engagement")+
+  `<section class="stats">${stat("Needs your attention",num(attention),"Questions, support and uncertain deliveries","info")}${stat("Answered",num(replies),"Confirmed replies and existing Page responses","check")}${stat("Waiting to send",num((count.queued||0)+(count.sending||0)),"Checked against current access and daily limits","clock")}${stat("Ad conversations",num(threads.length),stale.length ? `${stale.length} coverage checks need attention` : "Facebook and Instagram ad posts","campaigns")}</section>`+
+  (stale.length ? `<div class="notice warn">${icon("info")}<span>Some posts have not been checked recently or need access. Review coverage below; the inbox may be incomplete.</span></div>`:"")+
+  `<section class="panel"><div class="panel-head"><div><h2>Each brand, its own approach</h2><p>Enable collection, choose a model, and set a reply allowance.</p></div></div>${brands.length ? brands.map(b=>{const c=data.configs.find(c=>c.id===b.id),usage=data.usage.find(u=>u.brandId===b.id);return `<div class="engagement-brand"><div class="brand-dot">${esc(b.name.slice(0,1))}</div><div class="engagement-brand-title"><strong>${esc(b.name)}</strong><p class="small muted">${c?.aiEnabled ? esc(c.model) : "Approved answers"} · ${usage?.requests||0} AI requests today${c?.lastDiscoveryAt ? ` · Checked ${ago(c.lastDiscoveryAt)}` : ""}</p>${c?.error ? `<p class="small error-text">${esc(c.error)}</p>`:""}</div>${badge(c?.mode==="auto" ? "Automatic replies" : c?.mode==="review" ? "Review mode" : "Off",c?.mode==="auto"?"green":"")}${btn("Settings","engagement-settings",b.id,"tiny","edit")}${c?.mode&&c.mode!=="off" ? btn("Sync comments","engagement-sync",b.id,"tiny","refresh") : ""}</div>`;}).join(""):empty("Add a brand to start.","Connect its ad account and Page, then choose how to respond.",btn("Add brand","new-brand","","primary","plus"))}</section>`+
+  `${state.commentsError ? `<div class="notice error">${esc(state.commentsError)} ${btn("Try again","comment-reload","","tiny")}</div>` : ""}<section class="panel mt"><div class="panel-head"><div><h2>Your comment inbox</h2><p>${state.commentsLoading ? "Loading conversations…" : `${state.comments?.total||0} comments in this view`}</p></div><select id="comment-filter" aria-label="Comment status">${[["attention","Needs attention"],["all","All comments"],["queued","Waiting to send"],["replied","Replied automatically / approved"],["answered","Already answered"],["ignored","Closed & own replies"]].map(([id,label])=>`<option value="${id}" ${(state.commentFilter||"attention")===id?"selected":""}>${label}</option>`).join("")}</select></div>${rows.length ? rows.map(c=>{const t=data.threads.find(t=>t.id===c.threadId),overdue=["review","failed","uncertain"].includes(c.status)&&Date.parse(c.receivedAt)<Date.now()-3600000;return `<article class="comment-row"><div class="comment-platform">${c.platform==="facebook" ? "f" : "◎"}</div><div class="comment-body"><div class="comment-meta"><strong>${esc(c.author||"Commenter")}</strong><span>${esc(t?.adName||"Ad conversation")} · ${ago(c.createdAt||c.receivedAt)}</span>${overdue?badge("Over 1 hour","amber"):""}</div><p class="comment-text">${esc(c.text||"Attachment / empty comment")}</p>${c.reply ? `<div class="comment-preview"><span>${c.status==="replied"?"Reply":"Draft"}</span>${esc(c.reply)}</div>`:""}<p class="small muted">${esc(c.reason)}</p></div><div class="comment-status">${badge(human(c.status),["replied","answered"].includes(c.status)?"green":["review","failed","uncertain"].includes(c.status)?"amber":"")}${btn("Open","comment-open",c.id,"tiny","arrow")}</div></article>`;}).join(""):empty(state.commentsLoading?"Loading your inbox…":"You’re up to date.","New comments appear here after the worker checks connected ad posts.","","check")}${state.comments?.nextOffset!==null&&state.comments?.nextOffset!==undefined ? `<div class="panel-foot">${btn("Load more comments","comment-more","","","down")}</div>`:""}</section>`+
+  `<details class="panel coverage-panel mt"><summary>Comment coverage · ${threads.length} ad posts</summary><div class="table-wrap"><table><thead><tr><th>Ad / placement</th><th>Last successful check</th><th>Status</th></tr></thead><tbody>${threads.map(t=>`<tr><td><strong>${esc(t.adName)}</strong><div class="small muted">${human(t.platform)} · ${t.adIds.length} ads</div></td><td>${t.lastSyncedAt?ago(t.lastSyncedAt):"Not checked yet"}</td><td>${esc(t.error||"Ready for the next check")}</td></tr>`).join("")}</tbody></table></div><p class="small muted">Webhooks speed up checks. Periodic scans recover missed notifications. Permissions, inaccessible posts and API limits can reduce coverage; unresolved items stay visible.</p></details>`;
+}
+function intelligence() {
+  const d=state.data.engagement, pages=d.pages.filter(p=>!state.brand||p.brandId===state.brand), healthy=pages.filter(p=>p.fetchedAt&&!p.error), profiles=pages.filter(p=>p.profiledAt), threads=d.threads.filter(t=>!state.brand||t.brandId===state.brand);
+  return heading("Every destination, understood.","A separate source of context for the offer, questions, and next step behind each ad.",'<a class="btn" href="#engagement">'+icon("arrow",15)+' Comment inbox</a>',"Page intelligence")+
+  `<section class="stats">${stat("Destination pages",num(pages.length),"Discovered from your ads and source settings","external")}${stat("Pages read",num(healthy.length),"Public page content is refreshed daily","eye")}${stat("Knowledge profiles",num(profiles.length),"Model summaries with source excerpts","spark")}${stat("Ad posts connected",num(threads.length),"Context stays with the relevant conversation","campaigns")}</section>`+
+  `<div class="notice">${icon("info")}<span>The worker reads public page text, then creates a profile. Replies cite that page internally and use the ad’s message or enquiry goal. Unreadable or stale sources send questions to review.</span></div>`+
+  `<div class="knowledge-grid">${pages.length ? pages.map(p=>`<article class="panel knowledge-card"><div class="knowledge-head"><div class="source-icon">${icon("external",22)}</div>${badge(p.error?"Needs attention":p.profiledAt?"Knowledge ready":"Reading page",p.error?"amber":p.profiledAt?"green":"")}</div><div class="eyebrow">${esc(brandBy(p.brandId)?.name||"Brand")}</div><h2>${esc(p.title)}</h2><a class="small break-url" href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">${esc(p.url)}</a><div class="knowledge-facts">${p.profile.slice(0,3).map(f=>`<div><strong>${esc(f.label)}</strong><p>${esc(f.value)}</p></div>`).join("")||'<p class="small muted">The offer and useful details will appear after this page is read.</p>'}</div>${p.error?`<p class="small error-text">${esc(p.error)}</p>`:""}<div class="knowledge-foot"><span class="small muted">${p.fetchedAt?`Read ${ago(p.fetchedAt)}`:"Waiting for worker"}${p.model?` · ${esc(p.model)}`:""}</span>${btn("View profile","knowledge-open",p.id,"tiny","arrow")}</div></article>`).join(""):empty("Build knowledge from your ads.","Turn on page intelligence in a brand’s engagement settings. Each discovered destination will be read automatically.",'<a class="btn primary" href="#engagement">Set up engagement</a>',"spark")}</div>`;
+}
+function commentDetail(id) {
+  const c=state.comments?.items.find(c=>c.id===id);if(!c)return;
+  const t=state.data.engagement.threads.find(t=>t.id===c.threadId), editable=["review","failed"].includes(c.status), link=t?.platform==="facebook" ? `https://www.facebook.com/${t.remoteId}` : t?.permalinkUrl || "https://business.facebook.com/latest/inbox/all";
+  modal("Conversation details",`${brandBy(c.brandId)?.name||"Brand"} · ${t?.adName||human(c.platform)}`,`<div class="comment-detail-original"><div class="comment-meta"><strong>${esc(c.author)}</strong>${badge(human(c.status))}</div><p>${esc(c.text)}</p><p class="small muted">${esc(c.reason)}</p></div>${c.ai?`<details class="form-section"><summary>${esc(c.ai.model)} · Evidence behind the draft</summary>${c.ai.evidence.map(e=>{const source=state.data.engagement.pages.find(p=>p.id===e.sourceId);return `<blockquote><p>${esc(e.quote)}</p><cite>${esc(source?.title||human(e.sourceId))}</cite></blockquote>`;}).join("")}</details>`:""}${editable ? `<form data-form="comment-reply" data-id="${esc(id)}"><div class="form-error" role="alert"></div>${field("reply","Public reply",c.reply,{area:true,full:true,rows:5,required:true,help:"This reply is posted publicly from your Page or Instagram account when the worker processes it."})}<div class="form-footer">${btn("Draft with AI","comment-draft",id,"","spark")}<button class="btn primary">Approve & queue public reply</button></div></form>` : c.reply?`<div class="comment-preview"><span>Reply</span>${esc(c.reply)}</div>`:""}<div class="form-footer">${link?`<a class="btn tiny" href="${link}" target="_blank" rel="noopener noreferrer">Open ${human(c.platform)} ${icon("external",13)}</a>`:""}${!["sending","replied","answered","ignored","deleted"].includes(c.status)?btn("Close without a reply","comment-dismiss",id,"tiny"):""}${btn("Done","close")}</div>`,true);
+}
+function knowledgeDetail(id){const p=state.data.engagement.pages.find(p=>p.id===id);if(!p)return;modal(p.title,"The page content used to support relevant replies.",`<p class="small"><a href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">${esc(p.url)}</a></p>${p.error?`<div class="notice warn mt">${esc(p.error)}</div>`:""}${p.profile.map(f=>`<section class="form-section"><h3>${esc(f.label)}</h3><p>${esc(f.value)}</p><blockquote>${esc(f.quote)}</blockquote></section>`).join("")}<p class="small muted mt">Profile generated by ${esc(p.model||"the selected reply model")}. Source excerpts are kept for checking the model’s interpretation.</p><div class="form-footer">${btn("Refresh this page","knowledge-refresh",id,"","refresh")}${btn("Close","close")}</div>`);}
+function engagementConnections(){return `<form class="panel connection" data-form="connections"><div class="connection-title"><div class="service">${icon("spark",22)}</div><h3>Engagement intelligence</h3>${badge("MiniMax / GLM")}</div><p>Read landing pages and write contextual comment replies. Choose a model and request allowance for each brand in Engagement.</p><div class="form-error" role="alert"></div><div class="form-grid">${secret("glmKey","Z.AI API key","For GLM-5.2 through Z.AI’s standard API.")}${secret("minimaxKey","MiniMax API key","For MiniMax M2.7 or M3 through the MiniMax API.")}${secret("metaWebhookVerifyToken","Meta webhook verification token","Choose a long random secret and use the same value in your Meta app webhook setup.")}</div><div class="eyebrow mt">Comment webhook callback</div><div class="code break-url">${esc(state.data.facebook.webhookUrl||"Set APP_ORIGIN first")}</div><p class="small muted mt">Configure Page feed and Instagram comments notifications in Meta. The inbox also performs periodic checks.</p><div class="form-footer"><button class="btn primary">Save engagement connections</button></div></form>`;}
+function ago(value){const delta=Math.max(0,Date.now()-Date.parse(value));if(!Number.isFinite(delta))return "Unknown";if(delta<60000)return "just now";if(delta<3600000)return `${Math.floor(delta/60000)}m ago`;if(delta<86400000)return `${Math.floor(delta/3600000)}h ago`;return `${Math.floor(delta/86400000)}d ago`;}

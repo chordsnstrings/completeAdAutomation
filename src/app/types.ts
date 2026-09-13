@@ -75,6 +75,11 @@ export const SECRET_NAMES = [
   "metaAppId",
   "metaAppSecret",
   "metaToken",
+  "metaUserToken",
+  "metaLoginConfigId",
+  "metaWebhookVerifyToken",
+  "minimaxKey",
+  "glmKey",
   "openaiKey",
   "seedanceKey",
   "googleServiceAccount",
@@ -258,7 +263,11 @@ export type Collection =
   | "leads"
   | "conversions"
   | "objects"
-  | "lineages";
+  | "lineages"
+  | "engagement"
+  | "commentThreads"
+  | "comments"
+  | "pageKnowledge";
 export class AppError extends Error {
   readonly status: number;
   constructor(message: string, status = 400) {
