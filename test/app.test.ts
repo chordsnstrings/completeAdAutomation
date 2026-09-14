@@ -68,6 +68,9 @@ function workspace() {
   const dir = mkdtempSync(join(tmpdir(), "ad-app-"));
   const store = new Store(dir),
     vault = new Vault(store);
+  store.setSetting("app", { ...DEFAULT_SETTINGS, provider: "seedance", videoModel: "seedance-1-5-pro-251215" });
+  // Network adapters below are injected; live transport guards still require a credential.
+  vault.set("metaToken", "isolated-test-meta-token");
   return {
     dir,
     store,
@@ -870,6 +873,7 @@ test("HTTP owner setup, CSRF, simulation, media ranges, secret redaction and log
     });
   try {
     assert.equal((await req("/api/bootstrap")).status, 401);
+    assert.equal((await req("/api/studio")).status, 401);
     const html = await req("/");
     assert.equal(html.status, 200);
     assert.ok(
@@ -914,9 +918,18 @@ test("HTTP owner setup, CSRF, simulation, media ranges, secret redaction and log
     const demo = await req("/api/demo", "POST", {});
     assert.equal(demo.status, 200);
     const b = ((await demo.json()) as { brand: ManagedBrand }).brand;
+    assert.equal((await req(`/api/studio/config?brand=${b.id}`, "POST", { mode: "auto" }, { "x-csrf-token": "bad" })).status, 403);
+    assert.equal((await req(`/api/studio?brand=${b.id}`)).status, 200);
+    assert.equal((await req("/studio.js")).status, 200);
     const run = await req(`/api/brands/${b.id}/run`, "POST", {});
     assert.equal(run.status, 202);
     await finish(app.engine, ((await run.json()) as { id: string }).id);
+    const outcomeRun = { ...app.store.list<CampaignRun>("runs")[0]!, id: "outcome-live-fixture", mode: "LIVE" as const, createdAt: "2020-01-01T00:00:00.000Z" };
+    app.store.put("runs", outcomeRun); app.vault.set("conversionWebhookToken", "test-only-outcome-webhook-token");
+    const outcome = { brandId: b.id, externalId: "order-http-1", version: 1, runId: outcomeRun.id, adId: "", occurredAt: nowIso(), currency: b.currency, revenueMinor: 1000, contributionMinor: 500, qualified: true };
+    assert.equal((await req("/api/webhooks/outcomes", "POST", outcome)).status, 401);
+    for (let attempt = 0; attempt < 2; attempt++) assert.equal((await req("/api/webhooks/outcomes", "POST", outcome, { cookie: "", authorization: "Bearer test-only-outcome-webhook-token" })).status, 202);
+    assert.equal(app.store.count("businessOutcomes"), 1);
     assert.equal((await req(`/api/brands/${b.id}`, "PUT", b)).status, 409);
     const c = app.store.list<Creative>("creatives")[0]!;
     const range = await req(`/api/media/${c.id}/9x16.mp4`, "GET", undefined, {
@@ -962,17 +975,20 @@ test("HTTP owner setup, CSRF, simulation, media ranges, secret redaction and log
       setTimeout() {},
       Intl,
       URL,
+      URLSearchParams,
       Date,
       console,
       fixtureData: JSON.parse(boot),
+      usageData: await (await req("/api/usage")).json(),
     };
-    const code = readFileSync(resolve("ui/app.js"), "utf8").replace(
+    const studioCode = readFileSync(resolve("ui/studio.js"), "utf8").replace("export function createStudio", "function createStudio");
+    const code = studioCode + "\n" + readFileSync(resolve("ui/app.js"), "utf8").replace('import { createStudio } from "/studio.js";', '').replace(
       "void init();",
       "",
     );
     runInNewContext(
       code +
-        `\nstate.data=fixtureData;state.plans={selected:{templateId:'single_engine',recommendation:{templateId:'single_engine'}},options:[]};for(const [page] of nav){location.hash='#'+page;render();if(!app.innerHTML.includes('<main'))throw Error(page+' did not render');}creativeDetail(state.data.creatives[0].id);brandForm(state.data.brands[0].id);funnelDetail('single_engine');`,
+        `\nstate.data=fixtureData;state.usage=usageData;state.usageKey=usageParams().toString();state.comments={items:[],total:0,nextOffset:null};state.commentsKey=":attention";state.plans={selected:{templateId:'single_engine',recommendation:{templateId:'single_engine'}},options:[]};for(const [page] of nav){location.hash='#'+page;render();if(!app.innerHTML.includes('<main'))throw Error(page+' did not render');}creativeDetail(state.data.creatives[0].id);brandForm(state.data.brands[0].id);funnelDetail('single_engine');`,
       context,
     );
     assert.equal((await req("/api/logout", "POST", {})).status, 200);

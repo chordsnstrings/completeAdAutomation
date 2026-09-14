@@ -74,6 +74,7 @@ export async function checkToken(
   appId: string,
   token: string,
   fetchImpl:typeof fetch=fetch,
+  facebookLogin = false,
 ): Promise<{ results: CheckResult[]; ok: boolean; systemUserId?: string }> {
   const results: CheckResult[] = [];
   let data: DebugTokenData;
@@ -135,6 +136,10 @@ export async function checkToken(
 
   results.push({ name: 'Token/app match', severity: 'PASS', detail: `app ${appId}` });
 
+  if ([data.expires_at, data.data_access_expires_at].some(t => typeof t === 'number' && t > 0 && t * 1000 <= Date.now())) {
+    results.push({ name: 'Token expiry', severity: 'BLOCK', detail: 'This authorization has expired.', remedy: facebookLogin ? 'Reconnect Facebook in Connections.' : 'Generate a new system user token.' });
+    return { ok: false, results };
+  }
   if (data.expires_at === 0) {
     results.push({ name: 'Token expiry', severity: 'PASS', detail: 'never expires' });
   } else if (typeof data.expires_at === 'number') {
@@ -144,14 +149,15 @@ export async function checkToken(
       severity: 'WARN',
       detail: `expires ${when}`,
       remedy:
-        'Re-mint without set_token_expires_in_60_days, or the loop stops on that date with no warning.',
+        facebookLogin ? 'Reconnect Facebook before this date. The workspace stops new work if access expires.' : 'Renew this token before it expires.',
     });
   }
 
   const held = new Set(data.scopes ?? []);
   for (const g of data.granular_scopes ?? []) held.add(g.scope);
 
-  const missing = REQUIRED_SCOPES.filter((s) => !held.has(s));
+  const required = facebookLogin ? REQUIRED_SCOPES.filter(s => s !== 'business_management') : REQUIRED_SCOPES;
+  const missing = required.filter((s) => !held.has(s));
   results.push(
     missing.length === 0
       ? { name: 'Required scopes', severity: 'PASS', detail: `all ${REQUIRED_SCOPES.length} present` }
@@ -159,7 +165,7 @@ export async function checkToken(
           name: 'Required scopes',
           severity: 'BLOCK',
           detail: `missing ${missing.join(', ')}`,
-          remedy: 'Scopes cannot be added to an existing token — re-mint with the full list.',
+          remedy: facebookLogin ? 'Enable these permissions in the Meta login configuration and reconnect Facebook.' : 'Scopes cannot be added to an existing token — re-mint with the full list.',
         },
   );
 
@@ -188,7 +194,7 @@ export async function checkToken(
     return { ok: false, results };
   }
 
-  return { ok: true, results, ...(data.user_id ? { systemUserId: data.user_id } : {}) };
+  return { ok: !results.some(r => r.severity === 'BLOCK'), results, ...(data.user_id ? { systemUserId: data.user_id } : {}) };
 }
 
 /**

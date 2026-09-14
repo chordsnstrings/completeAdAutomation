@@ -9,6 +9,7 @@ import type {
 import type { AccountContext } from "../meta/publish.ts";
 
 export interface ManagedBrand extends Brand {
+  currencyUnitVersion?: 1;
   currency: string;
   timezone: string;
   funnel: FunnelTemplateId | "auto";
@@ -45,10 +46,12 @@ export interface Check {
   remedy?: string;
 }
 export interface Settings {
-  provider: "seedance" | "veo";
+  provider: "seedance" | "veo" | "minimax";
   textModel: string;
   textInputUsdPerMillion: number;
   textOutputUsdPerMillion: number;
+  textCachedUsdPerMillion?: number;
+  h3UsdPerSecond?: number;
   videoModel: string;
   googleProject: string;
   googleBucket: string;
@@ -58,11 +61,13 @@ export interface Settings {
   emergencyPending: boolean;
 }
 export const DEFAULT_SETTINGS: Settings = {
-  provider: "seedance",
+  provider: "minimax",
   textModel: "gpt-4.1-mini",
   textInputUsdPerMillion: 0.4,
   textOutputUsdPerMillion: 1.6,
-  videoModel: "seedance-1-5-pro-251215",
+  textCachedUsdPerMillion: 0.1,
+  h3UsdPerSecond: 0.08,
+  videoModel: "MiniMax-H3",
   googleProject: "",
   googleBucket: "",
   googleRegion: "us-central1",
@@ -74,6 +79,11 @@ export const SECRET_NAMES = [
   "metaAppId",
   "metaAppSecret",
   "metaToken",
+  "metaUserToken",
+  "metaLoginConfigId",
+  "metaWebhookVerifyToken",
+  "minimaxKey",
+  "glmKey",
   "openaiKey",
   "seedanceKey",
   "googleServiceAccount",
@@ -93,6 +103,10 @@ export type RunPhase =
   | "activate"
   | "complete";
 export interface CampaignRun {
+  agentBrief?: unknown;
+  agentRunId?: string;
+  agentConfig?: import('../agents/contracts.ts').FrozenConfig;
+  experimentId?: string;
   creativeRevision?: number;
   correctionFeedback?: string[];
   id: string;
@@ -126,6 +140,7 @@ export interface CampaignRun {
   };
 }
 export interface PublishedStage {
+  activationPending?: boolean;
   stageId: string;
   campaignId: string;
   adSetId: string;
@@ -159,7 +174,7 @@ export interface Creative {
     | "published";
   taskId: string;
   taskSubmittedAt: string;
-  provider: "seedance" | "veo";
+  provider: "seedance" | "veo" | "minimax";
   model: string;
   generationEstimateUsd: number;
   outputUri: string;
@@ -256,7 +271,15 @@ export type Collection =
   | "leads"
   | "conversions"
   | "objects"
-  | "lineages";
+  | "lineages"
+  | "engagement"
+  | "commentThreads"
+  | "comments"
+  | "pageKnowledge"
+  | "brandMemory"
+  | "experiments"
+  | "businessOutcomes"
+  | "costAdjustments";
 export class AppError extends Error {
   readonly status: number;
   constructor(message: string, status = 400) {
@@ -266,3 +289,10 @@ export class AppError extends Error {
   }
 }
 export const nowIso = (): string => new Date().toISOString();
+export class TransientAppError extends AppError {
+  readonly retryAfterMs: number;
+  constructor(message: string, retryAfterMs = 60000) {
+    super(message, 429);
+    this.retryAfterMs = retryAfterMs;
+  }
+}

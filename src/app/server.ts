@@ -7,6 +7,9 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { Store } from "./store.ts";
+import { studioApi } from "../agents/api.ts";
+import { Economics } from "../agents/economics.ts";
+import { UsageLedger, defaultChatRates, chatRate, tokenRate } from "./usage.ts";
 import {
   Vault,
   digest,
@@ -37,8 +40,11 @@ import { allPlans, planFor } from "./planner.ts";
 import { conversionPayload } from "./webhooks.ts";
 import { FUNNEL_TEMPLATES, AUDIENCE_POOLS } from "../funnel/templates.ts";
 import { ARCHETYPES } from "../meta/objectives.ts";
-import { currencyOffset } from "../meta/publish.ts";
+import { currencyOffset, ZERO_DECIMAL_CURRENCIES, AMBIGUOUS_MINOR_UNIT_CURRENCIES } from "../meta/publish.ts";
 import { timedFetch } from "./network.ts";
+import { MetaAuthorization, metaConnection } from "./meta-auth.ts";
+import type { MetaSelection, MetaConnection } from "./meta-auth.ts";
+import type { MetaAssets } from "./meta.ts";
 
 export interface AppOptions {
   dataDir: string;
@@ -46,6 +52,7 @@ export interface AppOptions {
   origin?: string;
   startWorker?: boolean;
   engineFactory?: (s: Store, v: Vault) => Engine;
+  oauthFetchImpl?: typeof fetch;
 }
 export function createApp(options: AppOptions) {
   const store = new Store(resolve(options.dataDir)),
@@ -53,6 +60,20 @@ export function createApp(options: AppOptions) {
     engine = options.engineFactory?.(store, vault) ?? new Engine(store, vault);
   const setup = setupToken(store);
   const origin = options.origin ? new URL(options.origin).origin : "";
+  const facebook = new MetaAuthorization(store, vault, origin, options.oauthFetchImpl);
+  function cookie(req: IncomingMessage, name: string): string {
+    return (req.headers.cookie ?? "").split(";").map(x => x.trim()).find(x => x.startsWith(`${name}=`))?.slice(name.length + 1) ?? "";
+  }
+  function setCookie(res: ServerResponse, value: string) {
+    const previous = res.getHeader("Set-Cookie");
+    res.setHeader("Set-Cookie", [...(Array.isArray(previous) ? previous.map(String) : previous ? [String(previous)] : []), value]);
+  }
+  function redirect(res: ServerResponse, target: string) {
+    res.statusCode = 303;
+    res.setHeader("Location", target);
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.end();
+  }
   const attempts = new Map<string, { count: number; until: number }>();
   function throttle(req: IncomingMessage) {
     const key = req.socket.remoteAddress ?? "unknown",
@@ -85,8 +106,7 @@ export function createApp(options: AppOptions) {
     store.db
       .prepare("INSERT INTO sessions VALUES(?,?,?)")
       .run(digest(token), csrf, Date.now() + 7 * 86400000);
-    res.setHeader(
-      "Set-Cookie",
+    setCookie(res,
       `sc_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800${origin.startsWith("https:") ? "; Secure" : ""}`,
     );
     return csrf;
@@ -157,9 +177,16 @@ export function createApp(options: AppOptions) {
       activity: store.list<Activity>("activity", undefined, 150),
       settings: engine.settings(),
       connections: vault.status(),
+      facebook: facebook.status(),
+      metaAssets: store.setting<MetaAssets | null>("metaAssetCache", null),
+      engagement: engine.engagement.snapshot(),
       funnels: FUNNEL_TEMPLATES,
       goals: ARCHETYPES,
       audiences: AUDIENCE_POOLS,
+      currencyRules: {
+        wholeUnits: [...ZERO_DECIMAL_CURRENCIES],
+        unsupported: [...AMBIGUOUS_MINOR_UNIT_CURRENCIES],
+      },
       leadCount: store.count("leads"),
       productionSpend: Object.fromEntries(
         brands.map((b) => [
@@ -187,7 +214,7 @@ export function createApp(options: AppOptions) {
       .list<CampaignRun>("runs", id)
       .some(
         (r) =>
-          r.stages.some((s) => s.active) ||
+          r.stages.some((s) => s.active || s.activationPending) ||
           ["queued", "running", "waiting"].includes(r.status),
       );
   }
@@ -213,9 +240,77 @@ export function createApp(options: AppOptions) {
       const s = session(req);
       json(res, {
         authenticated: Boolean(s),
-        setupRequired: !store.setting("ownerPassword", ""),
+        setupRequired: !facebook.established(),
         csrf: s?.["csrf"] ?? "",
+        facebook: facebook.publicStatus(),
       });
+      return;
+    }
+    if (path === "/api/meta/webhook" && method === "GET") {
+      const verify = vault.get("metaWebhookVerifyToken"), challenge = url.searchParams.get("hub.challenge") ?? "";
+      if (!verify || url.searchParams.get("hub.mode") !== "subscribe" || !equal(url.searchParams.get("hub.verify_token") ?? "", verify) || challenge.length > 500) throw new AppError("Invalid webhook verification.", 403);
+      res.setHeader("Content-Type", "text/plain; charset=utf-8"); res.end(challenge); return;
+    }
+    if (path === "/api/meta/webhook" && method === "POST") {
+      const chunks: Buffer[] = []; let size = 0;
+      for await (const chunk of req) { const bytes = Buffer.from(chunk); size += bytes.length; if (size > 1024 * 1024) throw new AppError("Webhook is too large.", 413); chunks.push(bytes); }
+      engine.engagement.webhook(Buffer.concat(chunks), String(req.headers["x-hub-signature-256"] ?? ""));
+      json(res, { accepted: true }); return;
+    }
+    if (path === "/api/meta/oauth/start" && method === "POST") {
+      requireOrigin(req);
+      throttle(req);
+      const o = object(await body(req));
+      const intent = String(o["intent"] ?? "login");
+      if (!["setup", "login", "connect", "recover"].includes(intent)) throw new AppError("Unknown Facebook connection request.");
+      let sessionHash = "";
+      if (intent === "connect") {
+        sessionHash = String(auth(req, true)["hash"]);
+        if (metaConnection(store, vault).method === "manual" && store.list<ManagedBrand>("brands").some(b => b.mode !== "SIMULATE" && (b.autonomy || hasWork(b.id))))
+          throw new AppError("Pause real campaign work before switching from a system-user connection to Facebook sign-in.", 409);
+      }
+      if (intent === "setup" || intent === "recover") {
+        if (!equal(string(o["token"], "Workspace setup token", 200, true), setup)) throw new AppError("The workspace setup token is incorrect.", 403);
+        if (intent === "setup" && facebook.established()) throw new AppError("This workspace already has an owner.", 409);
+        if (o["config"]) facebook.configure(object(o["config"]));
+      }
+      const browserSecret = randomBytes(32).toString("base64url");
+      const result = facebook.start(intent as "setup" | "login" | "connect" | "recover", browserSecret, sessionHash);
+      setCookie(res, `sc_oauth=${browserSecret}; HttpOnly; SameSite=Lax; Path=/api/meta/oauth; Max-Age=600${origin.startsWith("https:") ? "; Secure" : ""}`);
+      json(res, result);
+      return;
+    }
+    if (path === "/api/meta/oauth/callback" && method === "GET") {
+      setCookie(res, `sc_oauth=; HttpOnly; SameSite=Lax; Path=/api/meta/oauth; Max-Age=0${origin.startsWith("https:") ? "; Secure" : ""}`);
+      try {
+        await facebook.finish(url.searchParams, cookie(req, "sc_oauth"));
+        startSession(res);
+        redirect(res, "/?facebook=connected#connections");
+      } catch (error) {
+        const detail = error instanceof AppError ? error.message : "Facebook sign-in could not be completed. Start again.";
+        redirect(res, `/?facebook=error&message=${encodeURIComponent(vault.redact(detail).slice(0, 350))}`);
+      }
+      return;
+    }
+    if (["/api/meta/deauthorize", "/api/meta/data-deletion"].includes(path) && method === "POST") {
+      if (!String(req.headers["content-type"]).startsWith("application/x-www-form-urlencoded")) throw new AppError("Use a signed form request.", 415);
+      let raw = "";
+      for await (const chunk of req) { raw += String(chunk); if (Buffer.byteLength(raw) > 20000) throw new AppError("Request is too large.", 413); }
+      const signed = facebook.verifySignedRequest(new URLSearchParams(raw).get("signed_request") ?? "");
+      facebook.forgetUser(signed.user_id, signed.issued_at);
+      if (path.endsWith("data-deletion")) {
+        const confirmation = randomBytes(24).toString("base64url");
+        store.db.prepare("INSERT INTO deletion_requests VALUES(?,?,?)").run(confirmation, nowIso(), "complete");
+        json(res, { url: `${origin}/data-deletion?code=${confirmation}`, confirmation_code: confirmation });
+      } else json(res, { success: true });
+      return;
+    }
+    if (path === "/api/meta/deletion-status" && method === "GET") {
+      const code = url.searchParams.get("code") ?? "";
+      if (!/^[\w-]{32}$/.test(code)) throw new AppError("Deletion confirmation not found.", 404);
+      const result = store.db.prepare("SELECT status,created_at FROM deletion_requests WHERE code=?").get(code);
+      if (!result) throw new AppError("Deletion confirmation not found.", 404);
+      json(res, result);
       return;
     }
     if (["/api/setup", "/api/login"].includes(path) && method === "POST") {
@@ -224,11 +319,12 @@ export function createApp(options: AppOptions) {
       const o = object(await body(req)),
         password = string(o["password"], "Password", 256, true);
       if (path === "/api/setup") {
-        if (store.setting("ownerPassword", ""))
+        if (facebook.established())
           throw new AppError("This workspace has already been set up.", 409);
         if (!equal(string(o["token"], "Setup token", 200, true), setup))
           throw new AppError("The setup token is incorrect.", 403);
         store.setSetting("ownerPassword", passwordHash(password));
+        store.setSetting("ownerEstablished", true);
         store.event(
           "",
           "success",
@@ -274,8 +370,58 @@ export function createApp(options: AppOptions) {
       json(res, { accepted: true, event_id: payload["event_id"] }, 202);
       return;
     }
+    if (path === "/api/webhooks/outcomes" && method === "POST") {
+      const token = vault.get("conversionWebhookToken");
+      if (!token || !equal(String(req.headers.authorization ?? ""), `Bearer ${token}`)) { throttle(req); throw new AppError("Unauthorized webhook.", 401); }
+      const payload = object(await body(req));
+      json(res, new Economics(store).recordOutcome(string(payload["brandId"], "Brand ID", 100, true), payload), 202); return;
+    }
     if (path.startsWith("/api/")) {
       const s = auth(req, !["GET", "HEAD"].includes(method));
+      if (path.startsWith("/api/studio")) { const result = await studioApi(engine, method, url, () => body(req)); if (result) { json(res, result.data, result.status); return; } }
+      if (path === "/api/usage" && method === "GET") {
+        json(res, new UsageLedger(store).query(url.searchParams)); return;
+      }
+      if (path === "/api/usage/pricing" && method === "GET") {
+        const rates = Object.entries(defaultChatRates()).map(([key]) => {
+          const [provider, model] = key.split(":") as [string, string];
+          return { key, provider, model, rate: chatRate(store, provider, model) };
+        });
+        json(res, { rates }); return;
+      }
+      if (path === "/api/usage/pricing" && method === "POST") {
+        const o = object(await body(req)), key = string(o["key"], "Model", 100, true);
+        if (!Object.hasOwn(defaultChatRates(), key)) throw new AppError("Choose a supported engagement model.");
+        const [provider, model] = key.split(":") as [string, string], old = chatRate(store, provider, model);
+        const rate = { ...old, ...tokenRate(old.input!, old.output!, old.cached, "Workspace rate override"), verifiedAt: nowIso().slice(0, 10) };
+        for (const field of ["input", "output", "cached"] as const) {
+          const v = o[field];
+          if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 1000) throw new AppError("Rates must be USD per million tokens between 0 and 1000.");
+          rate[field] = v;
+        }
+        if (old.longContext) {
+          const long = object(o["longContext"]);
+          rate.longContext = { ...old.longContext };
+          for (const field of ["input", "output", "cached"] as const) {
+            const v = long[field]; if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 1000) throw new AppError("Set all three long-context rates for MiniMax M3.");
+            rate.longContext[field] = v;
+          }
+        }
+        store.setSetting("chatRates", { ...store.setting("chatRates", {}), [key]: rate });
+        store.event("", "info", "AI model rate updated", `${model}: new requests use the updated rate. Historical receipts retain their original rate.`);
+        json(res, { rate }); return;
+      }
+      if (path === "/api/usage/export" && method === "GET") {
+        const entries = new UsageLedger(store).query(url.searchParams, true).entries;
+        const rows = entries.map(e => ({ id: e.id, createdAtUtc: e.createdAt, brandId: e.brandId, runId: e.runId ?? "", creativeId: e.creativeId ?? "", stageId: e.stageId ?? "", pageId: e.pageId ?? "", threadId: e.threadId ?? "", commentId: e.commentId ?? "", adIds: (e.adIds ?? []).join(";"), shot: e.shotIndex === undefined ? "" : e.shotIndex + 1,
+          provider: e.provider, model: e.model, action: e.action, agentRole: e.agentRole ?? "unattributed", agentVersion: e.agentVersion ?? "", experimentId: e.experimentId ?? "", attempt: e.attempt, state: e.state, costStatus: e.costStatus, currency: e.currency,
+          calculatedUsd: e.costMicros === null ? "" : (e.costMicros / 1e6).toFixed(6), estimateUsd: e.estimatedMicros === null ? "" : (e.estimatedMicros / 1e6).toFixed(6),
+          ...Object.fromEntries(Object.entries(e.metrics).map(([k, v]) => [k, v ?? ""])), requestId: e.requestId, taskId: e.taskId, httpStatus: e.httpStatus ?? "", latencyMs: e.latencyMs ?? "", billingUnit: e.rate.unit,
+          rateSnapshot: JSON.stringify(e.rate), providerUsage: JSON.stringify(e.rawUsage), detail: e.detail }));
+        const keys = rows.length ? Object.keys(rows[0]!) : ["id", "createdAtUtc", "brandId", "provider", "model", "action", "costStatus", "calculatedUsd", "estimateUsd"];
+        res.setHeader("Content-Type", "text/csv; charset=utf-8"); res.setHeader("Content-Disposition", 'attachment; filename="ai-usage.csv"');
+        res.end("\uFEFF" + [keys.map(csv).join(","), ...rows.map(r => keys.map(k => csv((r as Record<string, unknown>)[k])).join(","))].join("\r\n")); return;
+      }
       if (path === "/api/logout" && method === "POST") {
         store.db
           .prepare("DELETE FROM sessions WHERE hash=?")
@@ -291,9 +437,36 @@ export function createApp(options: AppOptions) {
         json(res, bootstrap());
         return;
       }
+      if (path === "/api/engagement/comments" && method === "GET") {
+        const offset = Number(url.searchParams.get("offset") ?? 0);
+        if (!Number.isSafeInteger(offset) || offset < 0 || offset > 10000000) throw new AppError("Invalid comment page.");
+        json(res, engine.engagement.comments(url.searchParams.get("brand") ?? "", url.searchParams.get("status") ?? "all", offset)); return;
+      }
+      const engagement = /^\/api\/engagement\/([a-z0-9-]+)(?:\/(sync|subscribe))?$/.exec(path);
+      if (engagement && method === "POST") {
+        const id = engagement[1]!;
+        if (engagement[2] === "subscribe") await engine.engagement.subscribe(id);
+        else if (engagement[2] === "sync") { engine.brand(id); store.enqueue("engagement-discover", id); for (const t of store.list<{ id: string }>("commentThreads", id)) store.enqueue("comment-sync", t.id); }
+        else engine.engagement.save(id, await body(req));
+        json(res, engine.engagement.snapshot()); return;
+      }
+      const comment = /^\/api\/comments\/([a-f0-9]{40})\/(approve|dismiss|draft)$/.exec(path);
+      if (comment && method === "POST") {
+        if (comment[2] === "approve") engine.engagement.approve(comment[1]!, object(await body(req))["reply"]);
+        else if (comment[2] === "draft") engine.engagement.queueDraft(comment[1]!);
+        else engine.engagement.dismiss(comment[1]!);
+        json(res, { ok: true }); return;
+      }
+      const knowledge = /^\/api\/knowledge\/([a-f0-9]{40})\/refresh$/.exec(path);
+      if (knowledge && method === "POST") {
+        const page = store.get<{ brandId: string }>("pageKnowledge", knowledge[1]!);
+        if (!page) throw new AppError("Knowledge page not found.", 404);
+        engine.engagement.intelligence.config(page.brandId);
+        store.enqueue("page-knowledge", knowledge[1]!); json(res, { queued: true }); return;
+      }
       if (path === "/api/password" && method === "POST") {
         const o = object(await body(req));
-        if (
+        if (store.setting("ownerPassword", "") &&
           !passwordMatches(
             string(o["current"], "Current password", 256, true),
             store.setting("ownerPassword", ""),
@@ -308,6 +481,45 @@ export function createApp(options: AppOptions) {
         json(res, { csrf: startSession(res) });
         return;
       }
+      if (path === "/api/meta/config" && method === "POST") {
+        facebook.configure(object(await body(req)));
+        json(res, facebook.status());
+        return;
+      }
+      if (path === "/api/meta/disconnect" && method === "POST") {
+        await engine.pauseAll();
+        if (engine.settings().emergencyPending) throw new AppError("Meta has not confirmed every campaign pause. Credentials are retained so those pauses can finish. Reconnect if necessary, then disconnect again.", 409);
+        vault.delete("metaUserToken");
+        vault.clearPageTokens();
+        store.setSetting("metaConnection", { ...metaConnection(store, vault), method: "none", status: "disconnected", userId: "", name: "", permissions: [], expiresAt: 0, dataAccessExpiresAt: 0, reason: "Advertising access is disconnected. Facebook owner sign-in remains linked." } satisfies MetaConnection);
+        store.setSetting("metaAssetCache", null);
+        store.event("", "info", "Facebook advertising disconnected", "Managed campaign pauses were confirmed and advertising credentials were removed from the active connection.");
+        json(res, { ok: true });
+        return;
+      }
+      if (path === "/api/meta/assets/select" && method === "POST") {
+        const input = object(await body(req));
+        const strings = (value: unknown) => {
+          if (!Array.isArray(value) || value.length > 5000 || value.some(v => typeof v !== "string")) throw new AppError("Choose accounts and Pages from the available list.");
+          return [...new Set(value as string[])];
+        };
+        const accountIds = strings(input["accountIds"]), pageIds = strings(input["pageIds"]);
+        const available = await engine.meta.discover();
+        if (accountIds.some(id => !available.accounts.some(a => a.id === id)) || pageIds.some(id => !available.pages.some(p => p.id === id)))
+          throw new AppError("An account or Page is no longer available. Refresh the list and select again.", 403);
+        for (const brand of store.list<ManagedBrand>("brands")) {
+          if (brand.mode !== "SIMULATE" && (brand.autonomy || hasWork(brand.id)) && (!accountIds.includes(brand.adAccountId) || !pageIds.includes(brand.pageId)))
+            throw new AppError(`Pause ${brand.name} before removing its ad account or Page.`, 409);
+        }
+        const selection: MetaSelection = { accountIds, pageIds, updatedAt: nowIso() };
+        store.setSetting("metaSelection", selection);
+        json(res, selection);
+        return;
+      }
+      if (path === "/api/meta/assets/details" && method === "GET") {
+        json(res, await engine.meta.assetDetails(url.searchParams.get("account") ?? "", url.searchParams.get("page") ?? ""));
+        return;
+      }
       if (path === "/api/connections" && method === "POST") {
         const o = object(await body(req));
         const settings = validateSettings(
@@ -315,6 +527,9 @@ export function createApp(options: AppOptions) {
           engine.settings(),
         );
         const secrets = object(o["secrets"] ?? {});
+        if (secrets["metaUserToken"] || secrets["metaLoginConfigId"]) throw new AppError("Use the Facebook connection flow to configure login credentials.");
+        if (facebook.owner() && secrets["metaAppId"] && String(secrets["metaAppId"]) !== vault.get("metaAppId")) throw new AppError("The Facebook owner is linked to the current Meta app.", 409);
+        if (secrets["metaToken"] && store.list<ManagedBrand>("brands").some(b => b.mode !== "SIMULATE" && (b.autonomy || hasWork(b.id)))) throw new AppError("Pause real campaign work before replacing the Meta authorization.", 409);
         if (
           store
             .list<CampaignRun>("runs")
@@ -350,6 +565,11 @@ export function createApp(options: AppOptions) {
             }
           }
           store.setSetting("app", settings);
+          if (secrets["metaToken"]) {
+            store.setSetting("metaConnection", { method: "manual", status: "connected", appId: vault.get("metaAppId"), userId: "", name: "System user", permissions: [], expiresAt: 0, dataAccessExpiresAt: 0, connectedAt: nowIso(), reason: "" } satisfies MetaConnection);
+            vault.clearPageTokens();
+            store.setSetting("metaAssetCache", null);
+          }
         });
         store.event(
           "",
@@ -362,13 +582,13 @@ export function createApp(options: AppOptions) {
       }
       if (path === "/api/connections/check" && method === "POST") {
         const checks = [];
-        if (vault.get("metaToken")) {
+        if (engine.meta.token(true)) {
           try {
             const found = await engine.meta.discover();
             checks.push({
               name: "Meta",
               severity: "PASS",
-              detail: `${found.accounts.length} accounts and ${found.pages.length} assigned Pages are accessible.`,
+              detail: `${found.accounts.length} accounts and ${found.pages.length} Pages are accessible.${found.warnings.length ? ` ${found.warnings.join(" ")}` : ""}`,
             });
           } catch (e) {
             checks.push({
@@ -379,7 +599,8 @@ export function createApp(options: AppOptions) {
           }
         }
         if (vault.get("openaiKey")) {
-          const r = await timedFetch(
+          try {
+          const r = await engine.production.fetchImpl(
             `https://api.openai.com/v1/models/${encodeURIComponent(engine.settings().textModel)}`,
             { headers: { authorization: `Bearer ${vault.get("openaiKey")}` } },
           );
@@ -390,6 +611,9 @@ export function createApp(options: AppOptions) {
               ? "Model access confirmed."
               : `Model check returned HTTP ${r.status}.`,
           });
+          } catch (error) {
+            checks.push({ name: "OpenAI", severity: "BLOCK", detail: vault.redact(String(error)) });
+          }
         }
         checks.push({
           name: "Video generation",
@@ -466,6 +690,10 @@ export function createApp(options: AppOptions) {
               409,
             );
           const next = validateManagedBrand(await body(req), brand);
+          if ((next.adAccountId !== brand.adAccountId || next.currency !== brand.currency) &&
+              (store.list<CampaignRun>("runs", brand.id).some(r => r.mode !== "SIMULATE" && r.stages.length > 0) ||
+               store.list<Metric>("metrics", brand.id).some(m => !m.simulation)))
+            throw new AppError("This brand has real campaign history. Create a separate brand for another ad account or currency so reporting and spend limits stay accurate.", 409);
           next.autonomy = false;
           store.put("brands", next);
           store.event(brand.id, "info", "Brand updated", next.name);
@@ -475,11 +703,12 @@ export function createApp(options: AppOptions) {
         if (!action && method === "DELETE") {
           if (brand.autonomy || hasWork(brand.id))
             throw new AppError("Pause this brand before archiving it.", 409);
-          if (store.list("runs", brand.id).length)
+          if (store.list("runs", brand.id).length || engine.agents.runs(brand.id).length || new UsageLedger(store).query(new URLSearchParams({brand:brand.id})).entries.length)
             throw new AppError(
-              "Brands with campaign history are retained for reporting. You can leave this brand paused.",
+              "Brands with campaign or AI history are retained for reporting. You can leave this brand paused.",
             );
           store.remove("brands", brand.id);
+          for (const collection of ["engagement", "commentThreads", "comments", "pageKnowledge"] as const) for (const item of store.list<{ id: string }>(collection, brand.id)) store.remove(collection, item.id);
           json(res, { ok: true });
           return;
         }
@@ -558,7 +787,9 @@ export function createApp(options: AppOptions) {
               );
             if (
               !vault.get("openaiKey") ||
-              !(engine.settings().provider === "seedance"
+              !(engine.settings().provider === "minimax"
+                ? vault.get("minimaxKey")
+                : engine.settings().provider === "seedance"
                 ? vault.get("seedanceKey")
                 : vault.get("googleServiceAccount"))
             )
@@ -670,13 +901,17 @@ export function createApp(options: AppOptions) {
     }
     if (
       ["GET", "HEAD"].includes(method) &&
-      ["/", "/app.html", "/app.js", "/app.css", "/mark.svg"].includes(path)
+      ["/", "/app.html", "/app.js", "/studio.js", "/public.js", "/app.css", "/mark.svg"].includes(path)
     ) {
       serveFile(
         req,
         res,
         join(options.uiDir, path === "/" ? "app.html" : path.slice(1)),
       );
+      return;
+    }
+    if (["GET", "HEAD"].includes(method) && ["/privacy", "/data-deletion", "/meta-setup"].includes(path)) {
+      serveFile(req, res, join(options.uiDir, `${path.slice(1)}.html`));
       return;
     }
     throw new AppError("Page not found.", 404);
@@ -700,6 +935,7 @@ export function createApp(options: AppOptions) {
     store,
     vault,
     engine,
+    facebook,
     close: async () => {
       engine.stop();
       await new Promise<void>((done) => server.close(() => done()));

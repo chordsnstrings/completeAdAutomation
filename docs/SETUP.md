@@ -1,9 +1,6 @@
-# What I need from you
+# Legacy CLI and system-user setup
 
-You run Path A: you own the Business portfolio, the Pages and the ad accounts. That is the
-easy path — **no App Review, no Business Verification, no screencast**. Standard Access is
-legally sufficient because Meta exempts *"a role in a Business that has claimed the app."*
-You can complete everything below in an afternoon.
+For the web workspace, start with [Facebook Login for Business](FACEBOOK-LOGIN.md) and [page intelligence / engagement](ENGAGEMENT.md). The remainder of this document covers the optional system-user CLI path. Meta access levels and review/verification requirements depend on the app, permissions, roles, and user population; check the current app dashboard rather than assuming an exemption.
 
 Nothing here should be pasted into chat. Put it in `.env` (git-ignored) and run
 `npm run preflight`, which verifies every item and tells you exactly what is missing.
@@ -15,8 +12,7 @@ Nothing here should be pasted into chat. Put it in `.env` (git-ignored) and run
 ### 1. A Meta app of type **Business**, connected to your Business portfolio
 
 App Dashboard → Create App → **Business** → then Settings → connect it to the business
-portfolio that owns your Pages and ad accounts. The connection is what grants the Standard
-Access exemption; without it you are back to App Review.
+portfolio that owns your Pages and ad accounts. Confirm the access level and review requirements for each permission in the current dashboard.
 
 Then App Settings → Advanced → Security → turn **Require App Secret** ON. Every call this
 system makes is server-side and already signs with `appsecret_proof`, so the toggle costs
@@ -24,7 +20,7 @@ nothing and closes off token replay from a browser.
 
 Give me: `META_APP_ID`, `META_APP_SECRET`.
 
-### 2. A **system user** token, never-expiring
+### 2. A **system user** token with an appropriate lifetime
 
 Business Settings → Users → System Users → Add. Give it **Admin** access.
 
@@ -36,7 +32,7 @@ order is the problem. It is:
 3. assign assets to it (below)
 4. *then* mint the token
 
-Mint with these scopes and **omit** `set_token_expires_in_60_days` so it never expires:
+Select the token lifetime supported by your app and workflow, and grant the required scopes:
 
 ```
 ads_management, ads_read, business_management,
@@ -170,3 +166,8 @@ video against an account that cannot deliver.
 Between those, spend moves inside a hard envelope you set once. That is not a human in the
 loop; it is the difference between an autonomous system and an unbounded one. The envelope
 is a number you change, not an approval you grant.
+
+
+## MiniMax H3 and usage
+
+New workspaces use MiniMax-H3 at 768P. Save a MiniMax pay-as-you-go API key in Connections; existing workspaces can select it as their video provider. The default rate is USD 0.08/output second. [Usage & costs](USAGE-AND-COSTS.md) explains accounting, token details, exports and historical records.

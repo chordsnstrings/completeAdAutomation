@@ -81,13 +81,13 @@ Verify the signature with a constant-time comparison, reject stale request times
 | `AUTOADS_MASTER_KEY`                                       | Optional 32-byte base64 encryption key; otherwise generated in the data directory       |
 | `AUTOADS_SETUP_TOKEN`                                      | Optional pre-provisioned owner setup token; otherwise generated in the data directory   |
 | `META_APP_ID`, `META_APP_SECRET`, `META_SYSTEM_USER_TOKEN` | Server credential fallbacks when the corresponding connection has not been saved        |
-| `OPENAI_API_KEY`, `SEEDANCE_API_KEY`                       | Provider credential fallbacks                                                           |
+| `OPENAI_API_KEY`, `SEEDANCE_API_KEY`, `MINIMAX_API_KEY`, `ZAI_API_KEY`                       | Provider credential fallbacks                                                           |
 | `GOOGLE_SERVICE_ACCOUNT_JSON`                              | Google service account JSON; project, region and output bucket are configured in the UI |
 | `CONVERSION_WEBHOOK_TOKEN`, `LEAD_WEBHOOK_SECRET`          | Integration credential fallbacks                                                        |
 
 In-memory environment variables are read by Node; Docker Compose's sample passes `APP_ORIGIN` and uses UI-managed connections. If you want to pass additional environment credentials into the container, declare them in your Compose environment or secret-management setup. Merely adding them to Compose's interpolation `.env` does not inject them into the service.
 
-The default OpenAI text/vision model is `gpt-4.1-mini`; narration uses `tts-1` with the generic Alloy voice. Script and visual-review responses use strict structured output and `store: false`. Review the [OpenAI structured-output contract](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses) and [speech endpoint](https://developers.openai.com/api/reference/resources/audio/subresources/speech/methods/create) when changing the provider implementation. Default text pricing is configurable in Connections. Narration reserves USD 15 per million UTF-16 code units; video estimates use the selected provider's checked-in model catalogue. These are estimates, not a provider billing guarantee.
+The default OpenAI text/vision model is `gpt-4.1-mini`; narration uses `tts-1` with the generic Alloy voice. Script and visual-review responses use strict structured output and `store: false`. Review the [OpenAI structured-output contract](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses) and [speech endpoint](https://developers.openai.com/api/reference/resources/audio/subresources/speech/methods/create) when changing the provider implementation. Default text pricing is configurable in Connections. Narration reserves USD 15 per million requested Unicode characters; video estimates use the selected provider's checked-in model catalogue. These are estimates, not a provider billing guarantee.
 
 ## Operations
 
@@ -96,3 +96,6 @@ Use **Pause all** before rotating Meta credentials or performing maintenance. Wa
 For backups, stop the app and snapshot the complete workspace volume, including `master.key` and media. Restore it with restrictive filesystem permissions. Losing the key requires reconnecting credentials; losing the database also loses managed-object and spend history and should not be treated as a fresh workspace authorized to recreate running campaigns.
 
 Queued transient errors retry with delay. After repeated ordinary run failures the campaign is blocked with a visible reason. Ambiguous paid submissions remain reserved and are not silently retried. Use the provider's task history and Activity to investigate; cancel the brand before starting an intentionally new attempt. The application does not bypass account restrictions, reviews, consent collection, ownership checks, or required asset setup.
+
+
+See [AI usage and H3 integration](USAGE-AND-COSTS.md) for MiniMax H3 v2, the granular cost ledger, usage API and rate snapshots.

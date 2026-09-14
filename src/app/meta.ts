@@ -10,11 +10,20 @@ import type { Vault } from "./security.ts";
 import type { ManagedBrand, Check } from "./types.ts";
 import { AppError, DEFAULT_SETTINGS, nowIso } from "./types.ts";
 import { timedFetch } from "./network.ts";
+import { metaConnection, expiredConnection, invalidateMetaConnection } from "./meta-auth.ts";
+import type { MetaSelection } from "./meta-auth.ts";
 
 export interface GraphNode {
   id: string;
   name?: string;
   [key: string]: unknown;
+}
+export interface MetaAssets {
+  accounts: GraphNode[];
+  pages: GraphNode[];
+  businesses: GraphNode[];
+  warnings: string[];
+  fetchedAt: string;
 }
 export class MetaGateway {
   readonly store: Store;
@@ -31,11 +40,47 @@ export class MetaGateway {
     this.vault = vault;
     this.fetchImpl = fetchImpl;
   }
-  client(mode: RuntimeMode = "LIVE"): MetaClient {
+  token(allowDisconnected = false): string {
+    const connection = metaConnection(this.store, this.vault);
+    if (expiredConnection(connection)) invalidateMetaConnection(this.store, this.vault, "Facebook authorization expired. Reconnect to continue.");
+    if (!allowDisconnected && (connection.status !== "connected" || expiredConnection(connection)))
+      throw new AppError("Reconnect Facebook in Connections to restore access.", 409);
+    return connection.method === "oauth" ? this.vault.get("metaUserToken") : connection.method === "manual" ? this.vault.get("metaToken") : "";
+  }
+  refreshConnectionState(): void {
+    if (expiredConnection(metaConnection(this.store, this.vault))) invalidateMetaConnection(this.store, this.vault, "Facebook authorization expired. Reconnect to continue.");
+  }
+  private credentialFor(path: string, mode: RuntimeMode): string {
+    if (mode === "SIMULATE") return "";
+    const token = this.token();
+    if (metaConnection(this.store, this.vault).method !== "oauth") return token;
+    const node = path.replace(/^\//, "").split("/")[0]!;
+    const page = this.store.list<ManagedBrand>("brands").find(b => b.pageId === node || b.destination.leadFormId === node)?.pageId ?? node;
+    return this.vault.pageToken(page) || token;
+  }
+  recordAuthError(error: unknown): void {
+    // An asset-specific permission denial must not revoke otherwise valid access.
+    if (error instanceof MetaApiError && [102, 190, 463, 467].includes(error.code))
+      invalidateMetaConnection(this.store, this.vault, "Facebook no longer accepts this authorization. Reconnect to restore access.");
+  }
+  private handleAuthError(error: unknown): never {
+    this.recordAuthError(error);
+    throw error;
+  }
+  private async ensurePageCredential(path: string): Promise<void> {
+    if (metaConnection(this.store, this.vault).method !== "oauth") return;
+    const node = path.replace(/^\//, "").split("/")[0]!;
+    const page = this.store.list<ManagedBrand>("brands").find(b => b.pageId === node || b.destination.leadFormId === node)?.pageId;
+    if (page && !this.vault.pageToken(page)) {
+      await this.pages();
+      if (!this.vault.pageToken(page)) throw new AppError("Reconnect Facebook with access to this Page before using its lead forms or content.", 403);
+    }
+  }
+  client(mode: RuntimeMode = "LIVE", path = ""): MetaClient {
     return new MetaClient({
       appId: this.vault.get("metaAppId"),
       appSecret: this.vault.get("metaAppSecret"),
-      accessToken: this.vault.get("metaToken"),
+      accessToken: this.credentialFor(path, mode),
       mode,
       fetchImpl: this.fetchImpl,
     });
@@ -45,7 +90,8 @@ export class MetaGateway {
     params: Record<string, string> = {},
     adAccountId = "",
   ): Promise<T> {
-    const client = this.client();
+    await this.ensurePageCredential(path);
+    const client = this.client("LIVE", path);
     return this.scheduler.run(
       {
         lane: "READ",
@@ -54,7 +100,7 @@ export class MetaGateway {
       },
       () =>
         client.get<T>(path, params, { adAccountId: adAccountId || "shared" }),
-    );
+    ).catch(error => this.handleAuthError(error));
   }
   async list(
     path: string,
@@ -83,16 +129,86 @@ export class MetaGateway {
       "Meta result exceeded 100 pages. Narrow the request before continuing.",
     );
   }
-  async discover(): Promise<{ accounts: GraphNode[]; pages: GraphNode[] }> {
-    const accounts = await this.list("me/adaccounts", {
-      fields: "id,name,currency,timezone_name,account_status",
+  async pages(): Promise<GraphNode[]> {
+    const connection = metaConnection(this.store, this.vault);
+    const oauth = connection.method === "oauth";
+    const pages = await this.list(oauth ? "me/accounts" : "me/assigned_pages", {
+      fields: `id,name,instagram_business_account{id,username}${oauth ? ",access_token,tasks" : ""}`,
     });
-    const pages = await this.list("me/assigned_pages", {
-      fields: "id,name,instagram_business_account{id,username}",
-    });
-    return { accounts, pages };
+    if (oauth && metaConnection(this.store, this.vault).connectedAt === connection.connectedAt) {
+      this.store.transaction(() => {
+        this.vault.clearPageTokens();
+        for (const page of pages) if (typeof page["access_token"] === "string") this.vault.savePageToken(page.id, page["access_token"]);
+      });
+    }
+    return pages.map(page => publicAsset(page, ["id", "name", "tasks", "instagram_business_account"]));
+  }
+  /** Comment IDs do not contain their Page ID. Always bind their transport explicitly. */
+  async pageRequest<T>(pageId: string, method: "GET" | "POST", path: string, params: Record<string, string>, adAccountId: string, beforePost?: () => void): Promise<T> {
+    if (!/^\d+$/.test(pageId) || !/^\d+(?:_\d+)?(?:\/(?:comments|replies|subscribed_apps))?$/.test(path)) throw new AppError("Invalid Page content request.");
+    this.token();
+    await this.ensurePageCredential(pageId);
+    const token = this.vault.pageToken(pageId) || (metaConnection(this.store, this.vault).method === "manual" ? this.token() : "");
+    if (!token) throw new AppError("Reconnect Facebook with access to this Page.", 403);
+    const client = new MetaClient({ appId: this.vault.get("metaAppId"), appSecret: this.vault.get("metaAppSecret"), accessToken: token, mode: "LIVE", fetchImpl: this.fetchImpl });
+    return this.scheduler.run({ lane: method === "GET" ? "READ" : "WRITE", adAccountId, headers: () => client.rateLimits.get(adAccountId) }, () => {
+      if (method === "GET") return client.get<T>(path, params, { adAccountId });
+      beforePost?.(); return client.post<T>(path, params, { adAccountId });
+    }).catch(error => this.handleAuthError(error));
+  }
+  async discover(): Promise<MetaAssets> {
+    const connection = metaConnection(this.store, this.vault);
+    const warnings: string[] = [];
+    const results = await Promise.allSettled([
+      this.list("me/adaccounts", { fields: "id,name,currency,timezone_name,account_status,business{id,name}" }),
+      this.pages(),
+      connection.method === "oauth" && connection.permissions.includes("business_management")
+        ? this.list("me/businesses", { fields: "id,name" }) : Promise.resolve([] as GraphNode[]),
+    ]);
+    const take = (index: number, label: string, fields: string[]) => {
+      const result = results[index]!;
+      if (result.status === "rejected") { warnings.push(`${label}: ${this.vault.redact(String(result.reason))}`); return []; }
+      return result.value.map(node => publicAsset(node, fields));
+    };
+    const assets: MetaAssets = {
+      accounts: take(0, "Ad accounts", ["id", "name", "currency", "timezone_name", "account_status", "business"]),
+      pages: take(1, "Facebook Pages", ["id", "name", "tasks", "instagram_business_account"]),
+      businesses: take(2, "Businesses", ["id", "name"]), warnings, fetchedAt: nowIso(),
+    };
+    const current = metaConnection(this.store, this.vault);
+    if (current.status !== "connected") throw new AppError("Facebook access needs to be reconnected.", 409);
+    if (current.connectedAt !== connection.connectedAt || current.userId !== connection.userId || current.method !== connection.method)
+      throw new AppError("Facebook authorization changed during discovery. Refresh the asset list.", 409);
+    if (connection.method === "oauth" && !connection.permissions.includes("business_management")) warnings.push("Business portfolio discovery needs business_management permission. Accounts shared directly with you are still listed.");
+    this.store.setSetting("metaAssetCache", assets);
+    return assets;
+  }
+  async assetDetails(accountId: string, pageId: string) {
+    if (!/^act_\d+$/.test(accountId) || (pageId && !/^\d+$/.test(pageId))) throw new AppError("Choose a valid ad account and Page.");
+    const assets = await this.discover();
+    if (!assets.accounts.some(a => a.id === accountId) || (pageId && !assets.pages.some(p => p.id === pageId))) throw new AppError("The selected account or Page is not accessible through this connection.", 403);
+    const warnings: string[] = [];
+    const read = async (path: string, label: string, fields: string) => {
+      try { return (await this.list(path, { fields }, accountId)).map(n => publicAsset(n, fields.split(","))); }
+      catch (error) { warnings.push(`${label}: ${this.vault.redact(String(error))}`); return []; }
+    };
+    const [pixels, instagram, forms, audiences, apps] = await Promise.all([
+      read(`${accountId}/adspixels`, "Pixels", "id,name"),
+      read(`${accountId}/instagram_accounts`, "Instagram accounts", "id,username"),
+      pageId ? read(`${pageId}/leadgen_forms`, "Lead forms", "id,name,status") : Promise.resolve([]),
+      read(`${accountId}/customaudiences`, "Audiences", "id,name,subtype"),
+      read(`${accountId}/advertisable_applications`, "Apps", "id,name"),
+    ]);
+    return { pixels, instagram, forms, audiences, apps, warnings };
+  }
+  assertSelected(brand: ManagedBrand): void {
+    if (brand.mode === "SIMULATE" || metaConnection(this.store, this.vault).method !== "oauth") return;
+    const selection = this.store.setting<MetaSelection>("metaSelection", { accountIds: [], pageIds: [], updatedAt: "" });
+    if (!selection.accountIds.includes(brand.adAccountId) || !selection.pageIds.includes(brand.pageId)) throw new AppError("Select this brand’s ad account and Page in Connections before enabling advertising.");
   }
   async check(brand: ManagedBrand): Promise<Check[]> {
+    if (brand.currencyUnitVersion !== 1 && ["COP", "CRC", "HUF", "IDR", "TWD"].includes(brand.currency))
+      return [{ name: "Budget units", severity: "BLOCK", detail: "Currency handling has been corrected. Review and save this brand’s daily, maximum, lifetime and target-cost budgets before continuing." }];
     if (brand.mode === "SIMULATE") {
       brand.account = {
         adAccountId: brand.adAccountId,
@@ -121,7 +237,7 @@ export class MetaGateway {
           "Set the verified call result action_type for this account in the brand’s advanced settings. Live optimization requires this mapping.",
       });
     if (
-      !this.vault.get("metaToken") ||
+      !this.token(true) ||
       !this.vault.get("metaAppSecret") ||
       !this.vault.get("metaAppId")
     )
@@ -129,15 +245,18 @@ export class MetaGateway {
         {
           name: "Meta connection",
           severity: "BLOCK",
-          detail: "Connect your Meta app and system user token in Connections.",
+          detail: "Connect Facebook and choose your assets in Connections.",
         },
       ];
+    try { this.assertSelected(brand); this.token(); }
+    catch (error) { return [{ name: "Facebook access", severity: "BLOCK", detail: this.vault.redact(String(error)) }]; }
     // Token validation is read-only; never creates or activates anything.
     const token = await checkToken(
       this.client(),
       this.vault.get("metaAppId"),
-      this.vault.get("metaToken"),
+      this.token(),
       this.fetchImpl,
+      metaConnection(this.store, this.vault).method === "oauth",
     );
     checks.push(...token.results);
     if (!token.ok) return checks;
@@ -186,12 +305,12 @@ export class MetaGateway {
           detail:
             "The account spending cap has been reached or is not configured.",
         });
-      const pages = await this.list("me/assigned_pages", { fields: "id,name" });
+      const pages = await this.pages();
       if (!pages.some((p) => p.id === brand.pageId))
         checks.push({
           name: "Facebook Page",
           severity: "BLOCK",
-          detail: "This Page is not assigned to the connected system user.",
+          detail: "This Page is not available to the connected Facebook authorization.",
         });
       else
         checks.push({
@@ -280,7 +399,8 @@ export class MetaGateway {
           params["status"] === "ACTIVE" ||
           (!/\/(campaigns|adsets)$/.test(path) &&
             (params["daily_budget"] !== undefined ||
-              params["lifetime_budget"] !== undefined));
+              params["lifetime_budget"] !== undefined ||
+              params["targeting"] !== undefined));
         if (delivery) {
           const current = this.store.get<ManagedBrand>("brands", brand.id);
           if (
@@ -290,7 +410,9 @@ export class MetaGateway {
           )
             throw new AppError("Live delivery has been paused.");
         }
-        const client = this.client(mode);
+        if (mode !== "SIMULATE" && params["status"] !== "PAUSED") this.assertSelected(brand);
+        if (mode !== "SIMULATE") await this.ensurePageCredential(path);
+        const client = this.client(mode, path);
         return this.scheduler.run(
           {
             lane: "WRITE",
@@ -302,7 +424,7 @@ export class MetaGateway {
         );
       });
     this.writes = write;
-    return write;
+    return write.catch(error => this.handleAuthError(error));
   }
   /** Exact-name recovery after ambiguous creates. No retry until a complete read proves absence. */
   async create(
@@ -407,4 +529,19 @@ export class MetaGateway {
       throw new AppError("This object is outside the managed campaign scope.");
     await this.post(id, { status }, brand, status === "PAUSED" ? "LIVE" : mode);
   }
+}
+
+/** Explicit fields only: Page access tokens and provider-only fields never enter API responses. */
+function publicAsset(node: GraphNode, fields: string[]): GraphNode {
+  const out: GraphNode = { id: String(node.id) };
+  for (const key of fields) {
+    const value = node[key];
+    if (key === "access_token" || value === undefined) continue;
+    if (["instagram_business_account", "business"].includes(key) && value && typeof value === "object") {
+      const inner = value as GraphNode;
+      out[key] = publicAsset(inner, ["id", "name", "username"]);
+    } else if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") out[key] = value;
+    else if (key === "tasks" && Array.isArray(value)) out[key] = value.filter(v => typeof v === "string");
+  }
+  return out;
 }

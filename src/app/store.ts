@@ -3,6 +3,7 @@ import { mkdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Collection, Job, Effect, Activity } from "./types.ts";
+import { migrateUsage } from "./usage.ts";
 import { AppError, nowIso } from "./types.ts";
 
 /** SQLite owns cross-process exclusion and durable job/effect state. */
@@ -18,16 +19,33 @@ export class Store {
       .exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS documents(collection TEXT NOT NULL,id TEXT NOT NULL,brand_id TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(collection,id));
       CREATE INDEX IF NOT EXISTS documents_brand ON documents(collection,brand_id,updated_at);
+      CREATE INDEX IF NOT EXISTS documents_revision ON documents(collection,brand_id,json_extract(data,'$.externalId'),json_extract(data,'$.version')) WHERE collection IN ('businessOutcomes','costAdjustments');
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS secrets(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY,csrf TEXT NOT NULL,expires INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS oauth_states(hash TEXT PRIMARY KEY,browser_hash TEXT NOT NULL,expires INTEGER NOT NULL,data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS page_tokens(page_id TEXT PRIMARY KEY,value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS deletion_requests(code TEXT PRIMARY KEY,created_at TEXT NOT NULL,status TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS engagement_ai_usage(id TEXT PRIMARY KEY,brand_id TEXT NOT NULL,day TEXT NOT NULL,model TEXT NOT NULL,tokens INTEGER NOT NULL DEFAULT 0);
+      CREATE INDEX IF NOT EXISTS engagement_ai_daily ON engagement_ai_usage(brand_id,day);
       CREATE TABLE IF NOT EXISTS effects(key TEXT PRIMARY KEY,state TEXT NOT NULL,value TEXT NOT NULL,updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,kind TEXT NOT NULL,entity_id TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'queued',due INTEGER NOT NULL,lease TEXT NOT NULL DEFAULT '',lease_until INTEGER NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT '');
       CREATE INDEX IF NOT EXISTS jobs_ready ON jobs(state,due,lease_until);
       CREATE TABLE IF NOT EXISTS charges(key TEXT PRIMARY KEY,brand_id TEXT NOT NULL,day TEXT NOT NULL,micros INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS charges_daily ON charges(brand_id,day);
+      CREATE TABLE IF NOT EXISTS ai_usage(id TEXT PRIMARY KEY,effect_key TEXT NOT NULL,brand_id TEXT NOT NULL,created_at TEXT NOT NULL,data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS ai_usage_date ON ai_usage(created_at,id);
+      CREATE INDEX IF NOT EXISTS ai_usage_brand ON ai_usage(brand_id,created_at,id);
+      CREATE INDEX IF NOT EXISTS ai_usage_effect ON ai_usage(effect_key);
       CREATE TABLE IF NOT EXISTS locks(name TEXT PRIMARY KEY,owner TEXT NOT NULL,until_ms INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS agent_models(id TEXT NOT NULL,version INTEGER NOT NULL,data TEXT NOT NULL,secret TEXT NOT NULL,PRIMARY KEY(id,version));
+      CREATE TABLE IF NOT EXISTS agent_runs(id TEXT PRIMARY KEY,brand_id TEXT NOT NULL,state TEXT NOT NULL,data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS agent_runs_brand ON agent_runs(brand_id,state);
+      CREATE TABLE IF NOT EXISTS agent_tasks(id TEXT PRIMARY KEY,run_id TEXT NOT NULL,brand_id TEXT NOT NULL,role TEXT NOT NULL,state TEXT NOT NULL,due INTEGER NOT NULL,lease TEXT NOT NULL DEFAULT '',lease_until INTEGER NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 0,data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS agent_tasks_ready ON agent_tasks(state,due,lease_until);
+      CREATE INDEX IF NOT EXISTS agent_tasks_run ON agent_tasks(run_id,state);
       PRAGMA optimize;`);
+    migrateUsage(this);
   }
   close(): void {
     this.db.close();
@@ -212,7 +230,7 @@ export class Store {
   startEffect(key: string): boolean {
     return (
       this.db
-        .prepare(`INSERT OR IGNORE INTO effects VALUES(?,'pending','null',?)`)
+        .prepare(`INSERT INTO effects VALUES(?,'pending','null',?) ON CONFLICT(key) DO UPDATE SET state='pending',value='null',updated_at=excluded.updated_at WHERE effects.state='failed'`)
         .run(key, nowIso()).changes === 1
     );
   }
@@ -242,10 +260,16 @@ export class Store {
     micros: number,
     limitUsd: number,
   ): void {
-    this.transaction(() => {
-      if (this.db.prepare("SELECT key FROM charges WHERE key=?").get(key))
-        return;
-      const used = this.spent(brandId, day);
+    this.transaction(() => this.reserveChargeInTransaction(key, brandId, day, micros, limitUsd));
+  }
+  /** Call within a transaction that also records the request and acquires its effect. */
+  reserveChargeInTransaction(key: string, brandId: string, day: string, micros: number, limitUsd: number): void {
+      const prior = this.db.prepare("SELECT day,micros FROM charges WHERE key=?").get(key);
+      if (prior && this.effect(key)?.state !== "failed") return;
+      // A definitively rejected attempt may be retried on another account day.
+      // Rebook its reservation against today's allowance before making that request.
+      const used = this.spent(brandId, day) -
+        (prior?.["day"] === day ? Number(prior["micros"]) : 0);
       if (
         !Number.isSafeInteger(micros) ||
         micros < 0 ||
@@ -255,9 +279,8 @@ export class Store {
           "The daily production allowance is exhausted. The job will wait until tomorrow.",
         );
       this.db
-        .prepare("INSERT INTO charges VALUES(?,?,?,?)")
+        .prepare("INSERT INTO charges VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET day=excluded.day,micros=excluded.micros")
         .run(key, brandId, day, micros);
-    });
   }
   settleCharge(key: string, micros: number): void {
     if (Number.isSafeInteger(micros) && micros >= 0)

@@ -16,6 +16,7 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run build
       - run: node --check ui/app.js
+      - run: node --check ui/studio.js
       - run: npm test
   container:
     runs-on: ubuntu-latest

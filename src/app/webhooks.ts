@@ -9,6 +9,7 @@ export async function deliverWebhook(
   url: string,
   lead: Lead,
   secret: string,
+  transport: typeof publicBytes = publicBytes,
 ): Promise<void> {
   if (!secret)
     throw new AppError("Set a CRM webhook signing secret in Connections.");
@@ -23,7 +24,7 @@ export async function deliverWebhook(
   const signature = createHmac("sha256", secret)
     .update(`${timestamp}.${body}`)
     .digest("hex");
-  await publicBytes(
+  await transport(
     url,
     1024 * 1024,
     {

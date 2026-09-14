@@ -76,6 +76,11 @@ export class Vault {
       metaAppId: "META_APP_ID",
       metaAppSecret: "META_APP_SECRET",
       metaToken: "META_SYSTEM_USER_TOKEN",
+      metaUserToken: "META_USER_ACCESS_TOKEN",
+      metaLoginConfigId: "META_LOGIN_CONFIG_ID",
+      metaWebhookVerifyToken: "META_WEBHOOK_VERIFY_TOKEN",
+      minimaxKey: "MINIMAX_API_KEY",
+      glmKey: "ZAI_API_KEY",
       openaiKey: "OPENAI_API_KEY",
       seedanceKey: "SEEDANCE_API_KEY",
       googleServiceAccount: "GOOGLE_SERVICE_ACCOUNT_JSON",
@@ -89,6 +94,20 @@ export class Vault {
       SECRET_NAMES.map((key) => [key, Boolean(this.get(key))]),
     );
   }
+  delete(key: SecretName): void {
+    this.store.db.prepare("DELETE FROM secrets WHERE key=?").run(key);
+  }
+  pageToken(id: string): string {
+    const row = this.store.db.prepare("SELECT value FROM page_tokens WHERE page_id=?").get(id);
+    return row ? this.open(String(row["value"])) : "";
+  }
+  savePageToken(id: string, token: string): void {
+    if (!/^\d+$/.test(id) || !token) throw new AppError("Invalid Page authorization.");
+    this.store.db.prepare("INSERT INTO page_tokens VALUES(?,?) ON CONFLICT(page_id) DO UPDATE SET value=excluded.value").run(id, this.seal(token));
+  }
+  clearPageTokens(): void {
+    this.store.db.prepare("DELETE FROM page_tokens").run();
+  }
   redact(message: string): string {
     let result = message;
     for (const key of SECRET_NAMES) {
@@ -97,7 +116,7 @@ export class Vault {
     }
     return result
       .replace(
-        /([?&](?:access_token|appsecret_proof|key)=)[^&\s]+/gi,
+        /([?&](?:access_token|input_token|appsecret_proof|client_secret|code|key)=)[^&\s]+/gi,
         "$1[redacted]",
       )
       .slice(0, 4000);

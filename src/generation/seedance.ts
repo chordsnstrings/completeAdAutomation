@@ -54,7 +54,7 @@ export interface FrameArea {
   readonly verified: boolean;
 }
 
-export const SEEDANCE_FRAME_AREAS: Readonly<Record<Resolution, FrameArea>> = {
+export const SEEDANCE_FRAME_AREAS: Readonly<Record<Exclude<Resolution, "768p">, FrameArea>> = {
   '480p': { areaPx: 864 * 480, dims: '864x480', verified: true },
   '720p': { areaPx: 1280 * 720, dims: '1280x720', verified: true },
   '1080p': { areaPx: 1920 * 1088, dims: '1920x1088 (1088, not 1080)', verified: true },
@@ -436,6 +436,7 @@ export class SeedanceProvider implements VideoProvider {
       );
     }
 
+    if (spec.resolution === "768p") throw new CapabilityError(this.id, spec.modelId, "resolution", "768P is an H3 resolution tier.");
     const area = SEEDANCE_FRAME_AREAS[spec.resolution];
     const tokens = pixelFrameTokens(area.areaPx, spec.durationSeconds, billing.fps);
 
@@ -607,7 +608,7 @@ export class SeedanceProvider implements VideoProvider {
     const resultExpiresAt =
       state === 'SUCCEEDED' && updatedAt !== undefined ? (updatedAt + ttl) * 1000 : undefined;
 
-    const base = { providerId: 'seedance' as const, modelId, taskId };
+    const base = { providerId: 'seedance' as const, modelId, taskId, usage: usage ?? {} };
 
     if (state === 'FAILED' || state === 'EXPIRED') {
       const err = asRecord(json['error']);

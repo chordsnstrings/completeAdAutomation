@@ -1,11 +1,14 @@
 import { createSign, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { MiniMaxProvider } from "../generation/minimax.ts";
+import { UsageLedger, chatRate, videoRate, speechRate } from "./usage.ts";
 import { SeedanceProvider } from "../generation/seedance.ts";
 import { VeoProvider } from "../generation/veo.ts";
-import type { VideoProvider, GenerationSpec } from "../generation/provider.ts";
+import { ProviderRequestError } from "../generation/provider.ts";
+import type { VideoProvider, GenerationSpec, ImageRef } from "../generation/provider.ts";
 import { TEMPLATE_SPECS, validateGenome } from "../domain/genome.ts";
 import type { CreativeGenome, CreativeTemplate } from "../domain/genome.ts";
 import { screenCreative } from "../policy/screen.ts";
@@ -29,7 +32,7 @@ import type { FfmpegTools, CutName } from "../assembly/ffmpeg.ts";
 import { runQaGates } from "../assembly/qa.ts";
 import type { Store } from "./store.ts";
 import type { Vault } from "./security.ts";
-import { DEFAULT_SETTINGS, AppError, nowIso } from "./types.ts";
+import { DEFAULT_SETTINGS, AppError, TransientAppError, nowIso } from "./types.ts";
 import type {
   Settings,
   ManagedBrand,
@@ -38,6 +41,9 @@ import type {
   Metric,
 } from "./types.ts";
 import { timedFetch, publicBytes } from "./network.ts";
+import { ModelRouter } from "../agents/router.ts";
+import { BrandMemory } from "../agents/memory.ts";
+import type { Schema } from "../agents/contracts.ts";
 
 const exec = promisify(execFile);
 const TEMPLATES = ["problem_solution_demo", "listicle", "comparison"] as const;
@@ -91,18 +97,25 @@ export class Production {
   readonly store: Store;
   readonly vault: Vault;
   readonly fetchImpl: typeof fetch;
+  readonly assetImpl: typeof publicBytes;
+  readonly usage: UsageLedger;
+  readonly router: ModelRouter;
   private google: { token: string; expires: number } | undefined;
   constructor(
     store: Store,
     vault: Vault,
     fetchImpl: typeof fetch = timedFetch,
+    assetImpl: typeof publicBytes = publicBytes,
   ) {
     this.store = store;
+    this.usage = new UsageLedger(store);
     this.vault = vault;
     this.fetchImpl = fetchImpl;
+    this.assetImpl = assetImpl;
+    this.router = new ModelRouter(store, vault, fetchImpl === timedFetch ? undefined : fetchImpl);
   }
   settings(): Settings {
-    return this.store.setting("app", DEFAULT_SETTINGS);
+    return { ...DEFAULT_SETTINGS, ...this.store.setting<Partial<Settings>>("app", {}) };
   }
   assertAllowed(brand: ManagedBrand, runId: string): void {
     if (this.settings().globalPaused)
@@ -167,8 +180,9 @@ export class Production {
     };
     return data.access_token;
   }
-  provider(id: Settings["provider"] = this.settings().provider): VideoProvider {
+  provider(id: Settings["provider"] = this.settings().provider, usdPerSecond = this.settings().h3UsdPerSecond ?? 0.08): VideoProvider {
     const settings = this.settings();
+    if (id === "minimax") return new MiniMaxProvider({ apiKey: this.vault.get("minimaxKey"), fetchImpl: this.fetchImpl, usdPerSecond });
     if (id === "seedance")
       return new SeedanceProvider({
         apiKey: this.vault.get("seedanceKey"),
@@ -192,116 +206,16 @@ export class Production {
     images: string[] = [],
   ): Promise<T> {
     const entity = key.split(":")[1] ?? "";
-    this.assertAllowed(
-      brand,
-      key.startsWith("copy:")
-        ? entity
-        : (this.store.get<Creative>("creatives", entity)?.runId ?? ""),
-    );
-    const settings = this.settings();
-    const request = {
-      model: settings.textModel,
-      instructions,
-      store: false,
-      max_output_tokens: 3500,
-      input: [
-        {
-          role: "user",
-          content: [
-            { type: "input_text", text: JSON.stringify(input) },
-            ...images.map((image_url) => ({
-              type: "input_image",
-              image_url,
-              detail: "low",
-            })),
-          ],
-        },
-      ],
-      text: {
-        format: {
-          type: "json_schema",
-          name: "ad_result",
-          strict: true,
-          schema,
-        },
-      },
-    };
-    const payload = JSON.stringify(request);
-    // UTF-8 bytes are a conservative text-token upper bound; image inputs are bounded.
-    const inputTokens =
-      Buffer.byteLength(
-        JSON.stringify(input) + instructions + JSON.stringify(schema),
-      ) +
-      2000 +
-      images.length * 3000;
-    const reserve = Math.ceil(
-      inputTokens * settings.textInputUsdPerMillion +
-        3500 * settings.textOutputUsdPerMillion,
-    );
-    const day = new Date().toLocaleDateString("en-CA", {
-      timeZone: brand.timezone,
-    });
-    const cached = this.store.effect(key);
-    if (cached?.state === "done") return cached.value as T;
-    if (cached?.state === "pending")
-      throw new AppError(
-        "A text request was interrupted. Its cost remains reserved; retry with a new production attempt.",
-      );
-    this.store.reserveCharge(
-      key,
-      brand.id,
-      day,
-      reserve,
-      brand.generationDailyUsd,
-    );
-    this.store.startEffect(key);
-    const res = await this.fetchImpl("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${this.vault.get("openaiKey")}`,
-        "content-type": "application/json",
-      },
-      body: payload,
-    });
-    const data = (await res.json()) as {
-      output?: Array<{
-        content?: Array<{ type: string; text?: string; refusal?: string }>;
-      }>;
-      usage?: { input_tokens: number; output_tokens: number };
-      error?: { message: string };
-      status?: string;
-    };
-    if (!res.ok) {
-      if (res.status < 500)
-        this.store.failEffect(key, data.error?.message ?? `HTTP ${res.status}`);
-      throw new AppError(
-        data.error?.message ?? `Creative service returned HTTP ${res.status}.`,
-      );
-    }
-    if (data.usage)
-      this.store.settleCharge(
-        key,
-        Math.ceil(
-          data.usage.input_tokens * settings.textInputUsdPerMillion +
-            data.usage.output_tokens * settings.textOutputUsdPerMillion,
-        ),
-      );
-    if (data.status !== "completed")
-      throw new AppError(
-        "The creative response was incomplete. No draft was approved.",
-      );
-    const content = data.output?.flatMap((o) => o.content ?? []) ?? [];
-    if (content.some((c) => c.type === "refusal"))
-      throw new AppError(
-        "The creative service declined this brief. Review the approved claims.",
-      );
-    const text = content
-      .filter((c) => c.type === "output_text")
-      .map((c) => c.text ?? "")
-      .join("");
-    const value = JSON.parse(text) as T;
-    this.store.finishEffect(key, value);
-    return value;
+    const creative = this.store.get<Creative>("creatives", entity);
+    const runId = key.startsWith("copy:") ? entity : creative?.runId ?? "";
+    this.assertAllowed(brand, runId);
+    const role = images.length ? "creative-reviewer" : "copywriter";
+    const selection = this.router.registry.forCampaign(role, brand.id, runId);
+    return this.router.call<T>({ brandId: brand.id, key, instruction: instructions, input,
+      schema: schema as Schema, images, role, ...selection,
+      context: { action: images.length ? "visual-review" : "creative-copy", runId,
+        creativeId: creative?.id ?? "", stageId: creative?.stageId ?? key.split(":")[2] ?? "" },
+      budget: { day: new Date().toLocaleDateString("en-CA", { timeZone: brand.timezone }), limitUsd: brand.generationDailyUsd } });
   }
   async draft(brand: ManagedBrand, run: CampaignRun): Promise<Creative[]> {
     const result: Creative[] = [];
@@ -323,11 +237,14 @@ export class Production {
     }
     return result;
   }
-  private async draftStage(
+  async draftStage(
     brand: ManagedBrand,
     run: CampaignRun,
     stageId: string,
   ): Promise<Creative[]> {
+    const existing = this.store.list<Creative>("creatives", brand.id).filter(c => c.runId === run.id && c.stageId === stageId && (c.revision ?? 0) === (run.creativeRevision ?? 0));
+    if (existing.length === brand.creativesPerCycle) { for (const c of existing) this.screen(brand, c); return existing; }
+    if (existing.length) throw new AppError("Incomplete stored draft batch requires review.");
     const prior = this.store
       .list<Creative>("creatives", brand.id, 100)
       .filter((c) => c.runId !== run.id);
@@ -396,6 +313,8 @@ export class Production {
                   ...(run.correctionFeedback ?? []),
                 ],
                 history,
+                memory: run.agentRunId ? JSON.parse(String(this.store.db.prepare("SELECT data FROM agent_runs WHERE id=?").get(run.agentRunId)?.["data"] ?? "{}")).context?.memory : new BrandMemory(this.store).snapshot(brand),
+                strategy: run.agentBrief ?? null,
               },
               TEXT_SCHEMA,
             )
@@ -463,8 +382,8 @@ export class Production {
         status: "planned",
         taskId: "",
         taskSubmittedAt: "",
-        provider: this.settings().provider,
-        model: this.settings().videoModel,
+        provider: run.agentConfig?.video?.provider ?? this.settings().provider,
+        model: run.agentConfig?.video?.model ?? this.settings().videoModel,
         generationEstimateUsd: 0,
         outputUri: "",
         file: "",
@@ -491,7 +410,7 @@ export class Production {
       this.screen(brand, creative);
       return creative;
     });
-    for (const creative of creatives) this.store.put("creatives", creative);
+    this.store.transaction(() => { for (const creative of creatives) this.store.put("creatives", creative); });
     return creatives;
   }
   screen(brand: ManagedBrand, c: Creative): void {
@@ -540,7 +459,8 @@ export class Production {
     c: Creative,
     simulation = false,
   ): Promise<void> {
-    const provider = simulation ? undefined : this.provider(c.provider);
+    const provider = simulation ? undefined : this.provider(c.provider, this.store.get<CampaignRun>("runs", c.runId)?.agentConfig?.video?.usdPerSecond);
+    let reference: ImageRef | undefined;
     for (let i = 0; i < c.shots.length; i++) {
       this.assertAllowed(brand, c.runId);
       const shot = c.shots[i]!;
@@ -552,9 +472,12 @@ export class Production {
       }
       const key = `video:${c.id}:${c.attempts}:${i}`;
       const prior = this.store.effect(key);
-      if (prior?.state === "done") {
-        shot.taskId = String(prior.value);
-        shot.submittedAt = prior.updatedAt;
+      const recorded = this.usage.forEffect(key);
+      if (prior?.state === "done" || (prior?.state === "pending" && recorded?.taskId)) {
+        shot.taskId = prior.state === "done" ? String(prior.value) : recorded!.taskId;
+        shot.submittedAt = recorded?.createdAt ?? prior.updatedAt;
+        if (prior.state === "pending") this.store.finishEffect(key, shot.taskId);
+        c.generationEstimateUsd += (recorded?.estimatedMicros ?? 0) / 1e6;
         shot.status = "generating";
         this.store.put("creatives", c);
         continue;
@@ -563,36 +486,44 @@ export class Production {
         throw new AppError(
           "A video submission has an uncertain outcome. It has not been resubmitted or charged twice. Check the provider task history.",
         );
+      if (brand.productImage && !reference) {
+        const asset = await this.assetImpl(brand.productImage, 10 * 1024 * 1024);
+        const png = asset.bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+        const jpeg = asset.bytes[0] === 0xff && asset.bytes[1] === 0xd8 && asset.bytes[2] === 0xff;
+        if (!png && !jpeg) throw new AppError("The product reference must contain a valid PNG or JPEG image.");
+        const mimeType = png ? "image/png" as const : "image/jpeg" as const;
+        reference = c.provider === "veo"
+          ? { kind: "base64", data: asset.bytes.toString("base64"), mimeType }
+          : { kind: "uri", uri: brand.productImage, mimeType };
+      }
       const spec: GenerationSpec = {
         modelId: c.model,
         prompt: `${shot.prompt}\nBrand facts: ${brand.proposition}. No people, faces, logos belonging to others, captions, text, or speech. Use the product reference faithfully. Vertical composition with the product inside the central 60%.`,
         durationSeconds: 8,
         aspectRatio: "9:16",
-        resolution: "720p",
-        audio: false,
-        ...(brand.productImage
-          ? {
-              firstFrame: {
-                kind: "uri" as const,
-                uri: brand.productImage,
-                mimeType: "image/jpeg" as const,
-              },
-            }
-          : {}),
+        resolution: c.provider === "minimax" ? "768p" : "720p",
+        audio: c.provider === "minimax",
+        ...(reference ? c.provider === "minimax" ? { referenceImages: [reference] } : { firstFrame: reference } : {}),
       };
       const estimate = provider!.estimateCost(spec);
       const day = new Date().toLocaleDateString("en-CA", {
         timeZone: brand.timezone,
       });
-      this.store.reserveCharge(
-        key,
-        brand.id,
-        day,
-        estimate.microUnits,
-        brand.generationDailyUsd,
-      );
-      this.store.startEffect(key);
-      const task = await provider!.submit(spec);
+      const usage = this.usage.begin({ brandId: brand.id, runId: c.runId, creativeId: c.id, stageId: c.stageId, shotIndex: i,
+        action: "video-generation", provider: c.provider, model: c.model, effectKey: key, rate: videoRate(estimate), estimatedMicros: estimate.microUnits }, { day, limitUsd: brand.generationDailyUsd });
+      let task;
+      try {
+        task = await provider!.submit(spec);
+      } catch (error) {
+        if (error instanceof ProviderRequestError) {
+          let envelope: unknown = {}; try { envelope = JSON.parse(error.body); } catch { /* No provider receipt. */ }
+          this.usage.response(usage.id, new Response(null, { status: error.httpStatus }), envelope);
+          if (error.httpStatus >= 400 && error.httpStatus < 500 && error.httpStatus !== 408) this.store.failEffect(key, error.message);
+        }
+        this.usage.failure(usage.id, "Video submission failed. Unknown outcomes retain their reservation and are not submitted again automatically.");
+        throw error;
+      }
+      this.usage.update(usage.id, { taskId: task.taskId, requestId: task.requestId ?? "", state: "running", detail: "Video accepted. Cost is reserved until the task receipt is available." });
       this.store.finishEffect(key, task.taskId);
       shot.taskId = task.taskId;
       shot.submittedAt = nowIso();
@@ -617,6 +548,7 @@ export class Production {
           "Video generation exceeded four hours. The provider task ID is preserved for recovery.",
         );
       const task = await this.provider(c.provider).poll(shot.taskId, 1);
+      this.usage.task(`video:${c.id}:${c.attempts}:${i}`, task);
       if (["FAILED", "EXPIRED"].includes(task.state))
         throw new AppError(
           `Video generation ${task.state.toLowerCase()}: ${task.error?.message ?? task.filteredReasons.join("; ")}`,
@@ -651,7 +583,7 @@ export class Production {
         }
         writeFileSync(
           shot.file,
-          (await publicBytes(uri, 100 * 1024 * 1024, headers)).bytes,
+          (await this.assetImpl(uri, 100 * 1024 * 1024, headers)).bytes,
           { mode: 0o600 },
         );
       } else throw new AppError("The provider returned no downloadable video.");
@@ -683,37 +615,61 @@ export class Production {
       return;
     }
     const key = `speech:${c.id}:${c.attempts}`;
-    if (this.store.effect(key)?.state === "pending")
+    if (["pending", "done"].includes(this.store.effect(key)?.state ?? ""))
       throw new AppError(
         "Narration was interrupted. Its cost remains reserved. Start a new production attempt.",
       );
-    this.store.reserveCharge(
-      key,
-      brand.id,
-      new Date().toLocaleDateString("en-CA", { timeZone: brand.timezone }),
-      Math.ceil(c.voiceover.length * 15),
-      brand.generationDailyUsd,
-    );
-    this.store.startEffect(key);
-    const res = await this.fetchImpl("https://api.openai.com/v1/audio/speech", {
+    if (this.router.registry.config(brand.id).bindings["voice-producer"]?.enabled === false) throw new AppError("The voice producer role was disabled by the owner.");
+    const model = this.router.registry.forCampaign("voice-producer", brand.id, c.runId).model;
+    this.router.registry.assertCapabilities(model, "voice-producer");
+    if (!model.verifiedAt) throw new AppError("Verify this speech connection in Agent Studio first.");
+    const credential = this.router.registry.credential(model);
+    if (!credential) throw new AppError("Connect the selected narration model.");
+    const characters = Array.from(c.voiceover).length;
+    if (characters > 3000 || !model.rate.perMillionCharacters) throw new AppError("Narration exceeds the character limit or has no configured price.");
+    const usage = this.usage.begin({ brandId: brand.id, runId: c.runId, creativeId: c.id, stageId: c.stageId, action: "narration", provider: model.provider, model: model.model, modelConfigVersion: `${model.id}@${model.version}`, effectKey: key,
+      rate: model.rate, estimatedMicros: Math.ceil(characters * model.rate.perMillionCharacters) }, { day: new Date().toLocaleDateString("en-CA", { timeZone: brand.timezone }), limitUsd: brand.generationDailyUsd });
+    try {
+    const res = await this.router.fetchImpl(`${model.endpoint}/audio/speech`, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${this.vault.get("openaiKey")}`,
+        authorization: `Bearer ${credential}`,
         "content-type": "application/json",
       },
+      redirect: "error", signal: AbortSignal.timeout(model.timeoutMs),
       body: JSON.stringify({
-        model: "tts-1",
-        voice: "alloy",
+        model: model.model,
+        voice: model.voice,
         input: c.voiceover,
         response_format: "mp3",
       }),
     });
-    if (!res.ok) throw new AppError(`Narration failed (HTTP ${res.status}).`);
+    this.usage.response(usage.id, res);
+    this.usage.update(usage.id, { metrics: { ...this.usage.get(usage.id)!.metrics, characters } });
+    if (!res.ok) {
+      if (res.status < 500 && res.status !== 408)
+        this.store.failEffect(key, `Narration failed (HTTP ${res.status}).`);
+      if (res.status === 429)
+        throw new TransientAppError("Narration is rate limited. Waiting before retrying.");
+      throw new AppError(`Narration failed (HTTP ${res.status}).`);
+    }
     const bytes = Buffer.from(await res.arrayBuffer());
     if (bytes.length > 20 * 1024 * 1024)
       throw new AppError("Narration exceeded the size limit.");
-    writeFileSync(path, bytes, { mode: 0o600 });
+    if (bytes.length < 100) throw new AppError("Narration response is empty or invalid.");
+    this.assertAllowed(brand, c.runId);
+    writeFileSync(`${path}.pending`, bytes, { mode: 0o600 });
+    renameSync(`${path}.pending`, path);
     this.store.finishEffect(key, true);
+    } catch (error) {
+      this.usage.failure(usage.id, "Narration failed or its output could not be saved. The request character estimate is retained.");
+      throw error;
+    }
+  }
+  async narrate(brand: ManagedBrand, c: Creative, simulation = false): Promise<void> {
+    const dir = join(this.store.dir, "media", c.id);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    await this.voice(brand, c, join(dir, "voice.mp3"), simulation);
   }
   async render(
     brand: ManagedBrand,
@@ -964,7 +920,7 @@ export class Production {
     const image = `data:image/jpeg;base64,${readFileSync(join(this.store.dir, "media", c.id, "contact.jpg")).toString("base64")}`;
     const images = [image];
     if (brand.productImage) {
-      const ref = await publicBytes(brand.productImage, 5 * 1024 * 1024);
+      const ref = await this.assetImpl(brand.productImage, 5 * 1024 * 1024);
       if (!/^image\/(jpeg|png|webp)/.test(ref.contentType))
         throw new AppError("The product reference must be an image.");
       images.push(
