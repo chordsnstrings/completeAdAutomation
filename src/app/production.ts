@@ -46,6 +46,17 @@ import { BrandMemory } from "../agents/memory.ts";
 import type { Schema } from "../agents/contracts.ts";
 
 const exec = promisify(execFile);
+/**
+ * The finished ad length, in one place.
+ *
+ * Every encode in the chain is pinned to this and the QA DURATION gate measures against
+ * it, so the render and the check that judges it cannot drift apart. The join's
+ * filtergraph derives its audio window from the same number: the narration is stretched
+ * to TARGET_DURATION_SECONDS - 0.4 and then padded by 0.4.
+ */
+const TARGET_DURATION_SECONDS = 16;
+/** Silent tail after the narration, inside the target length. */
+const NARRATION_TAIL_SECONDS = 0.4;
 const TEMPLATES = ["problem_solution_demo", "listicle", "comparison"] as const;
 const TEXT_SCHEMA = {
   type: "object",
@@ -722,7 +733,7 @@ export class Production {
     const duration = Number(voiceProbe.format.duration);
     if (!(duration > 0))
       throw new AppError("Narration has no measurable duration.");
-    const tempo = duration / 15.6;
+    const tempo = duration / (TARGET_DURATION_SECONDS - NARRATION_TAIL_SECONDS);
     if (tempo < 0.5 || tempo > 2)
       throw new AppError(
         "The narration needs to be between 8 and 31 seconds. Shorten or expand the approved brief.",
@@ -736,7 +747,7 @@ export class Production {
       "-i",
       voice,
       "-filter_complex",
-      `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,trim=duration=8,setpts=PTS-STARTPTS[v0];[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,trim=duration=8,setpts=PTS-STARTPTS[v1];[v0][v1]concat=n=2:v=1:a=0[v];[2:a]atempo=${tempo.toFixed(6)},apad=pad_dur=0.4,atrim=duration=16,aresample=48000[a]`,
+      `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,trim=duration=8,setpts=PTS-STARTPTS[v0];[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,trim=duration=8,setpts=PTS-STARTPTS[v1];[v0][v1]concat=n=2:v=1:a=0[v];[2:a]atempo=${tempo.toFixed(6)},apad=pad_dur=${NARRATION_TAIL_SECONDS},atrim=duration=${TARGET_DURATION_SECONDS},aresample=48000[a]`,
       "-map",
       "[v]",
       "-map",
@@ -758,7 +769,7 @@ export class Production {
       "-ac",
       "2",
       "-t",
-      "16",
+      String(TARGET_DURATION_SECONDS),
       "-movflags",
       "+faststart",
       "-use_editlist",
@@ -811,6 +822,14 @@ export class Production {
         "48000",
         "-ac",
         "2",
+        // Pin the cut to the target the DURATION gate measures against. The join is
+        // already capped at 16s, but loudnorm and this encode each add a few tens of
+        // milliseconds of container padding, and the accumulated drift crosses the gate's
+        // 0.15s tolerance on longer narrations — the pipeline failing its own check. The
+        // amount of padding varies by FFmpeg build, so leaving it unpinned makes
+        // publishability depend on which FFmpeg the host happens to ship.
+        "-t",
+        String(TARGET_DURATION_SECONDS),
         "-movflags",
         "+faststart",
         "-use_editlist",
@@ -842,7 +861,7 @@ export class Production {
       const report = runQaGates({
         cut,
         probe,
-        targetDurationSeconds: 16,
+        targetDurationSeconds: TARGET_DURATION_SECONDS,
         black: {
           intervals: black,
           ...(luma !== undefined ? { firstFrameYavg: luma } : {}),
@@ -860,7 +879,13 @@ export class Production {
           severity: (r.status === "PASS" ? "PASS" : "BLOCK") as
             | "PASS"
             | "BLOCK",
-          detail: r.reason,
+          // The gates build their evidence precisely so a blocked run can be diagnosed:
+          // "duration is not publishable" alone leaves an operator with a stopped
+          // pipeline and no number to act on, while the evidence says it missed 16s by
+          // 0.16s and names the arithmetic. Carry it through.
+          detail: r.evidence.length
+            ? `${r.reason}: ${r.evidence.join("; ")}`
+            : r.reason,
         })),
       );
       c.variants[cut] = output;

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { Brand, ResolvedAdConfig, SpecialAdCategory } from '../src/domain/brand.ts';
-import { resolveAdConfig } from '../src/domain/brand.ts';
+import { ConfigConflictError, resolveAdConfig } from '../src/domain/brand.ts';
 import type { ConversionArchetype } from '../src/meta/objectives.ts';
 import {
   AMBIGUOUS_MINOR_UNIT_CURRENCIES,
@@ -498,12 +498,28 @@ test('adset: promoted_object shape differs per archetype', () => {
   assert.ok(!('promoted_object' in traffic));
 });
 
+test('brand: catalogue sales refuse to default the conversion event before anything is paid for', () => {
+  // The publish-time guard below is the last line of defence, but reaching it means the
+  // script, the video, the narration and the visual review have all been paid for on a
+  // brand that could never have published. Resolving the config refuses first.
+  assert.throws(
+    () => resolveAdConfig(makeBrand({ archetype: 'catalog_sales', destination: { productSetId: '6001' } })),
+    (e: unknown) => e instanceof ConfigConflictError && /customEventType/.test((e as Error).message),
+  );
+});
+
 test('adset: catalogue sales refuse to default the conversion event', () => {
+  // Reached directly: a resolved config that lost its event type on the way to publish
+  // must still be refused rather than defaulted, whatever validated it upstream.
+  const request = makeRequest({
+    brand: { archetype: 'catalog_sales', destination: { productSetId: '6001', customEventType: 'PURCHASE' } },
+  });
+  // Omit the key outright rather than setting it to undefined: exactOptionalPropertyTypes
+  // treats those as different things, and the guard is about absence.
+  const { customEventType: _dropped, ...destination } = request.config.destination;
+  const stripped: PublishRequest = { ...request, config: { ...request.config, destination } };
   assertFails(
-    () => buildAdSetRequest(
-      makeRequest({ brand: { archetype: 'catalog_sales', destination: { productSetId: '6001' } } }),
-      { campaignId: '900' },
-    ),
+    () => buildAdSetRequest(stripped, { campaignId: '900' }),
     'promoted_object.custom_event_type',
     'will not default it',
   );

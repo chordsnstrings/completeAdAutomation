@@ -154,6 +154,12 @@ function requireDestinationFor(spec: ArchetypeSpec, dest: Destination, brandId: 
       break;
     case 'product_set':
       if (!dest.productSetId) missing.push('productSetId');
+      // publish.ts also requires custom_event_type for a product_set promoted_object and
+      // refuses to default it. Enforcing it here too is not duplication: this runs when
+      // the brand is saved, whereas publish runs after scripting, video generation,
+      // narration and visual review have all been paid for. Catching it there means the
+      // money is already spent on a brand that could never have published.
+      if (!dest.customEventType) missing.push('customEventType');
       break;
     case 'app':
       if (!dest.applicationId) missing.push('applicationId');
