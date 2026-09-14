@@ -41,6 +41,9 @@ import type {
   Metric,
 } from "./types.ts";
 import { timedFetch, publicBytes } from "./network.ts";
+import { ModelRouter } from "../agents/router.ts";
+import { BrandMemory } from "../agents/memory.ts";
+import type { Schema } from "../agents/contracts.ts";
 
 const exec = promisify(execFile);
 const TEMPLATES = ["problem_solution_demo", "listicle", "comparison"] as const;
@@ -96,6 +99,7 @@ export class Production {
   readonly fetchImpl: typeof fetch;
   readonly assetImpl: typeof publicBytes;
   readonly usage: UsageLedger;
+  readonly router: ModelRouter;
   private google: { token: string; expires: number } | undefined;
   constructor(
     store: Store,
@@ -108,6 +112,7 @@ export class Production {
     this.vault = vault;
     this.fetchImpl = fetchImpl;
     this.assetImpl = assetImpl;
+    this.router = new ModelRouter(store, vault, fetchImpl === timedFetch ? undefined : fetchImpl);
   }
   settings(): Settings {
     return { ...DEFAULT_SETTINGS, ...this.store.setting<Partial<Settings>>("app", {}) };
@@ -175,9 +180,9 @@ export class Production {
     };
     return data.access_token;
   }
-  provider(id: Settings["provider"] = this.settings().provider): VideoProvider {
+  provider(id: Settings["provider"] = this.settings().provider, usdPerSecond = this.settings().h3UsdPerSecond ?? 0.08): VideoProvider {
     const settings = this.settings();
-    if (id === "minimax") return new MiniMaxProvider({ apiKey: this.vault.get("minimaxKey"), fetchImpl: this.fetchImpl, usdPerSecond: this.settings().h3UsdPerSecond ?? 0.08 });
+    if (id === "minimax") return new MiniMaxProvider({ apiKey: this.vault.get("minimaxKey"), fetchImpl: this.fetchImpl, usdPerSecond });
     if (id === "seedance")
       return new SeedanceProvider({
         apiKey: this.vault.get("seedanceKey"),
@@ -201,112 +206,16 @@ export class Production {
     images: string[] = [],
   ): Promise<T> {
     const entity = key.split(":")[1] ?? "";
-    this.assertAllowed(
-      brand,
-      key.startsWith("copy:")
-        ? entity
-        : (this.store.get<Creative>("creatives", entity)?.runId ?? ""),
-    );
-    const settings = this.settings();
-    const request = {
-      model: settings.textModel,
-      instructions,
-      store: false,
-      max_output_tokens: 3500,
-      input: [
-        {
-          role: "user",
-          content: [
-            { type: "input_text", text: JSON.stringify(input) },
-            ...images.map((image_url) => ({
-              type: "input_image",
-              image_url,
-              detail: "low",
-            })),
-          ],
-        },
-      ],
-      text: {
-        format: {
-          type: "json_schema",
-          name: "ad_result",
-          strict: true,
-          schema,
-        },
-      },
-    };
-    const payload = JSON.stringify(request);
-    // UTF-8 bytes are a conservative text-token upper bound; image inputs are bounded.
-    const inputTokens =
-      Buffer.byteLength(
-        JSON.stringify(input) + instructions + JSON.stringify(schema),
-      ) +
-      2000 +
-      images.length * 3000;
-    const reserve = Math.ceil(
-      inputTokens * settings.textInputUsdPerMillion +
-        3500 * settings.textOutputUsdPerMillion,
-    );
-    const day = new Date().toLocaleDateString("en-CA", {
-      timeZone: brand.timezone,
-    });
-    const cached = this.store.effect(key);
-    if (cached?.state === "done") return cached.value as T;
-    if (cached?.state === "pending")
-      throw new AppError(
-        "A text request was interrupted. Its cost remains reserved; retry with a new production attempt.",
-      );
-    const creative = this.store.get<Creative>("creatives", key.split(":")[1] ?? "");
-    const usage = this.usage.begin({ brandId: brand.id, provider: "openai", model: settings.textModel, effectKey: key,
-      action: images.length ? "visual-review" : "creative-copy", runId: creative?.runId ?? key.split(":")[1] ?? "", creativeId: creative?.id ?? "", stageId: creative?.stageId ?? "",
-      rate: chatRate(this.store, "openai", settings.textModel), estimatedMicros: reserve }, { day, limitUsd: brand.generationDailyUsd });
-    try {
-    const res = await this.fetchImpl("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${this.vault.get("openaiKey")}`,
-        "content-type": "application/json",
-      },
-      body: payload,
-    });
-    const data = (await res.json()) as {
-      output?: Array<{
-        content?: Array<{ type: string; text?: string; refusal?: string }>;
-      }>;
-      usage?: { input_tokens: number; output_tokens: number };
-      error?: { message: string };
-      status?: string;
-    };
-    this.usage.response(usage.id, res, data);
-    if (!res.ok) {
-      if (res.status < 500 && res.status !== 408)
-        this.store.failEffect(key, data.error?.message ?? `HTTP ${res.status}`);
-      if (res.status === 429)
-        throw new TransientAppError("The text service is rate limited. Waiting before retrying.");
-      throw new AppError(
-        data.error?.message ?? `Creative service returned HTTP ${res.status}.`,
-      );
-    }
-    if (data.status !== "completed")
-      throw new AppError(
-        "The creative response was incomplete. No draft was approved.",
-      );
-    const content = data.output?.flatMap((o) => o.content ?? []) ?? [];
-    if (content.some((c) => c.type === "refusal"))
-      throw new AppError(
-        "The creative service declined this brief. Review the approved claims.",
-      );
-    const text = content
-      .filter((c) => c.type === "output_text")
-      .map((c) => c.text ?? "")
-      .join("");
-    const value = JSON.parse(text) as T;
-    this.store.finishEffect(key, value);
-    return value;
-    } catch (error) {
-      this.usage.failure(usage.id, "Creative or visual request failed or could not be validated. Any recorded provider usage is retained.");
-      throw error;
-    }
+    const creative = this.store.get<Creative>("creatives", entity);
+    const runId = key.startsWith("copy:") ? entity : creative?.runId ?? "";
+    this.assertAllowed(brand, runId);
+    const role = images.length ? "creative-reviewer" : "copywriter";
+    const selection = this.router.registry.forCampaign(role, brand.id, runId);
+    return this.router.call<T>({ brandId: brand.id, key, instruction: instructions, input,
+      schema: schema as Schema, images, role, ...selection,
+      context: { action: images.length ? "visual-review" : "creative-copy", runId,
+        creativeId: creative?.id ?? "", stageId: creative?.stageId ?? key.split(":")[2] ?? "" },
+      budget: { day: new Date().toLocaleDateString("en-CA", { timeZone: brand.timezone }), limitUsd: brand.generationDailyUsd } });
   }
   async draft(brand: ManagedBrand, run: CampaignRun): Promise<Creative[]> {
     const result: Creative[] = [];
@@ -328,11 +237,14 @@ export class Production {
     }
     return result;
   }
-  private async draftStage(
+  async draftStage(
     brand: ManagedBrand,
     run: CampaignRun,
     stageId: string,
   ): Promise<Creative[]> {
+    const existing = this.store.list<Creative>("creatives", brand.id).filter(c => c.runId === run.id && c.stageId === stageId && (c.revision ?? 0) === (run.creativeRevision ?? 0));
+    if (existing.length === brand.creativesPerCycle) { for (const c of existing) this.screen(brand, c); return existing; }
+    if (existing.length) throw new AppError("Incomplete stored draft batch requires review.");
     const prior = this.store
       .list<Creative>("creatives", brand.id, 100)
       .filter((c) => c.runId !== run.id);
@@ -401,6 +313,8 @@ export class Production {
                   ...(run.correctionFeedback ?? []),
                 ],
                 history,
+                memory: run.agentRunId ? JSON.parse(String(this.store.db.prepare("SELECT data FROM agent_runs WHERE id=?").get(run.agentRunId)?.["data"] ?? "{}")).context?.memory : new BrandMemory(this.store).snapshot(brand),
+                strategy: run.agentBrief ?? null,
               },
               TEXT_SCHEMA,
             )
@@ -468,8 +382,8 @@ export class Production {
         status: "planned",
         taskId: "",
         taskSubmittedAt: "",
-        provider: this.settings().provider,
-        model: this.settings().videoModel,
+        provider: run.agentConfig?.video?.provider ?? this.settings().provider,
+        model: run.agentConfig?.video?.model ?? this.settings().videoModel,
         generationEstimateUsd: 0,
         outputUri: "",
         file: "",
@@ -496,7 +410,7 @@ export class Production {
       this.screen(brand, creative);
       return creative;
     });
-    for (const creative of creatives) this.store.put("creatives", creative);
+    this.store.transaction(() => { for (const creative of creatives) this.store.put("creatives", creative); });
     return creatives;
   }
   screen(brand: ManagedBrand, c: Creative): void {
@@ -545,7 +459,7 @@ export class Production {
     c: Creative,
     simulation = false,
   ): Promise<void> {
-    const provider = simulation ? undefined : this.provider(c.provider);
+    const provider = simulation ? undefined : this.provider(c.provider, this.store.get<CampaignRun>("runs", c.runId)?.agentConfig?.video?.usdPerSecond);
     let reference: ImageRef | undefined;
     for (let i = 0; i < c.shots.length; i++) {
       this.assertAllowed(brand, c.runId);
@@ -701,23 +615,31 @@ export class Production {
       return;
     }
     const key = `speech:${c.id}:${c.attempts}`;
-    if (this.store.effect(key)?.state === "pending")
+    if (["pending", "done"].includes(this.store.effect(key)?.state ?? ""))
       throw new AppError(
         "Narration was interrupted. Its cost remains reserved. Start a new production attempt.",
       );
+    if (this.router.registry.config(brand.id).bindings["voice-producer"]?.enabled === false) throw new AppError("The voice producer role was disabled by the owner.");
+    const model = this.router.registry.forCampaign("voice-producer", brand.id, c.runId).model;
+    this.router.registry.assertCapabilities(model, "voice-producer");
+    if (!model.verifiedAt) throw new AppError("Verify this speech connection in Agent Studio first.");
+    const credential = this.router.registry.credential(model);
+    if (!credential) throw new AppError("Connect the selected narration model.");
     const characters = Array.from(c.voiceover).length;
-    const usage = this.usage.begin({ brandId: brand.id, runId: c.runId, creativeId: c.id, stageId: c.stageId, action: "narration", provider: "openai", model: "tts-1", effectKey: key,
-      rate: speechRate(), estimatedMicros: Math.ceil(characters * 15) }, { day: new Date().toLocaleDateString("en-CA", { timeZone: brand.timezone }), limitUsd: brand.generationDailyUsd });
+    if (characters > 3000 || !model.rate.perMillionCharacters) throw new AppError("Narration exceeds the character limit or has no configured price.");
+    const usage = this.usage.begin({ brandId: brand.id, runId: c.runId, creativeId: c.id, stageId: c.stageId, action: "narration", provider: model.provider, model: model.model, modelConfigVersion: `${model.id}@${model.version}`, effectKey: key,
+      rate: model.rate, estimatedMicros: Math.ceil(characters * model.rate.perMillionCharacters) }, { day: new Date().toLocaleDateString("en-CA", { timeZone: brand.timezone }), limitUsd: brand.generationDailyUsd });
     try {
-    const res = await this.fetchImpl("https://api.openai.com/v1/audio/speech", {
+    const res = await this.router.fetchImpl(`${model.endpoint}/audio/speech`, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${this.vault.get("openaiKey")}`,
+        authorization: `Bearer ${credential}`,
         "content-type": "application/json",
       },
+      redirect: "error", signal: AbortSignal.timeout(model.timeoutMs),
       body: JSON.stringify({
-        model: "tts-1",
-        voice: "alloy",
+        model: model.model,
+        voice: model.voice,
         input: c.voiceover,
         response_format: "mp3",
       }),
@@ -734,6 +656,8 @@ export class Production {
     const bytes = Buffer.from(await res.arrayBuffer());
     if (bytes.length > 20 * 1024 * 1024)
       throw new AppError("Narration exceeded the size limit.");
+    if (bytes.length < 100) throw new AppError("Narration response is empty or invalid.");
+    this.assertAllowed(brand, c.runId);
     writeFileSync(`${path}.pending`, bytes, { mode: 0o600 });
     renameSync(`${path}.pending`, path);
     this.store.finishEffect(key, true);
@@ -741,6 +665,11 @@ export class Production {
       this.usage.failure(usage.id, "Narration failed or its output could not be saved. The request character estimate is retained.");
       throw error;
     }
+  }
+  async narrate(brand: ManagedBrand, c: Creative, simulation = false): Promise<void> {
+    const dir = join(this.store.dir, "media", c.id);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    await this.voice(brand, c, join(dir, "voice.mp3"), simulation);
   }
   async render(
     brand: ManagedBrand,

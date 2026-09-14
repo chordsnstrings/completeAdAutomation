@@ -103,6 +103,10 @@ export type RunPhase =
   | "activate"
   | "complete";
 export interface CampaignRun {
+  agentBrief?: unknown;
+  agentRunId?: string;
+  agentConfig?: import('../agents/contracts.ts').FrozenConfig;
+  experimentId?: string;
   creativeRevision?: number;
   correctionFeedback?: string[];
   id: string;
@@ -271,7 +275,11 @@ export type Collection =
   | "engagement"
   | "commentThreads"
   | "comments"
-  | "pageKnowledge";
+  | "pageKnowledge"
+  | "brandMemory"
+  | "experiments"
+  | "businessOutcomes"
+  | "costAdjustments";
 export class AppError extends Error {
   readonly status: number;
   constructor(message: string, status = 400) {

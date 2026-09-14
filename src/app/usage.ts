@@ -1,14 +1,18 @@
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
+export const taskUsageContext = new AsyncLocalStorage<Partial<UsageContext>>();
 import type { Store } from './store.ts';
 import { AppError, DEFAULT_SETTINGS, nowIso, type Settings } from './types.ts';
 import type { TaskStatus, CostEstimate } from '../generation/provider.ts';
+import { assertAiBudget } from '../agents/budgets.ts';
 
-export const USAGE_ACTIONS = ['creative-copy', 'visual-review', 'video-generation', 'narration', 'page-profile', 'comment-draft', 'reply-verification', 'legacy'] as const;
-export const AGENT_ROLES: Record<UsageAction, string> = { 'creative-copy': 'copywriter', 'visual-review': 'creative-reviewer', 'video-generation': 'video-producer', narration: 'voice-producer', 'page-profile': 'brand-researcher', 'comment-draft': 'community-manager', 'reply-verification': 'response-reviewer', legacy: 'unattributed' };
+export const USAGE_ACTIONS = ['creative-copy', 'visual-review', 'video-generation', 'narration', 'page-profile', 'comment-draft', 'reply-verification', 'agent-analysis', 'model-probe', 'message-draft', 'legacy'] as const;
+export const AGENT_ROLES: Record<UsageAction, string> = { 'creative-copy': 'copywriter', 'visual-review': 'creative-reviewer', 'video-generation': 'video-producer', narration: 'voice-producer', 'page-profile': 'brand-researcher', 'comment-draft': 'community-manager', 'reply-verification': 'response-reviewer', 'agent-analysis': 'performance-analyst', 'model-probe': 'model-verifier', 'message-draft': 'community-manager', legacy: 'unattributed' };
 export type UsageAction = typeof USAGE_ACTIONS[number];
 export interface UsageRate {
   unit: 'tokens' | 'seconds' | 'pixel-frame-tokens' | 'characters' | 'unknown';
   input: number | null; output: number | null; cached: number | null;
+  cacheWrite?: number | null;
   perSecond: number | null; perMillionCharacters: number | null;
   extraImage: number | null; freeImages: number;
   source: string; verifiedAt: string; note: string;
@@ -17,12 +21,14 @@ export interface UsageRate {
 export interface UsageMetrics {
   inputTokens: number | null; outputTokens: number | null; totalTokens: number | null;
   cachedTokens: number | null; reasoningTokens: number | null;
+  cacheWriteTokens?: number | null;
   inputAudioTokens: number | null; outputAudioTokens: number | null;
   inputVideoSeconds: number | null; outputVideoSeconds: number | null;
   inputImages: number | null; inputAudioSeconds: number | null;
   characters: number | null; pixelFrameTokens: number | null;
 }
 export interface UsageContext {
+  agentRunId?: string; agentTaskId?: string;
   brandId: string; action: UsageAction; agentRole?: string; agentVersion?: string; modelConfigVersion?: string; experimentId?: string; runId?: string; creativeId?: string; stageId?: string;
   pageId?: string; commentId?: string; threadId?: string; adIds?: string[]; shotIndex?: number;
 }
@@ -75,7 +81,7 @@ export function speechRate(): UsageRate {
 /** Save only recognised numeric metering fields, never response text, reasoning or credentials. */
 function cleanUsage(raw: unknown): Record<string, unknown> {
   const result: Record<string, unknown> = {}, u = object(raw);
-  const keys = ['input_tokens', 'output_tokens', 'prompt_tokens', 'completion_tokens', 'total_tokens', 'cached_tokens', 'reasoning_tokens', 'audio_tokens', 'total_seconds', 'input_seconds', 'output_seconds', 'input_image_count', 'input_audio_seconds'];
+  const keys = ['cache_creation_input_tokens', 'input_tokens', 'output_tokens', 'prompt_tokens', 'completion_tokens', 'total_tokens', 'cached_tokens', 'reasoning_tokens', 'audio_tokens', 'total_seconds', 'input_seconds', 'output_seconds', 'input_image_count', 'input_audio_seconds'];
   for (const key of keys) if (seconds(u[key]) !== null) result[key] = u[key];
   for (const key of ['input_tokens_details', 'output_tokens_details', 'prompt_tokens_details', 'completion_tokens_details']) {
     const d = object(u[key]), clean: Record<string, unknown> = {};
@@ -86,7 +92,7 @@ function cleanUsage(raw: unknown): Record<string, unknown> {
 }
 function validUsage(raw: unknown): boolean {
   const u = object(raw);
-  for (const key of ['input_tokens', 'output_tokens', 'prompt_tokens', 'completion_tokens', 'total_tokens', 'cached_tokens', 'reasoning_tokens', 'audio_tokens', 'input_image_count'])
+  for (const key of ['cache_creation_input_tokens', 'input_tokens', 'output_tokens', 'prompt_tokens', 'completion_tokens', 'total_tokens', 'cached_tokens', 'reasoning_tokens', 'audio_tokens', 'input_image_count'])
     if (u[key] !== undefined && u[key] !== null && count(u[key]) === null) return false;
   for (const key of ['total_seconds', 'input_seconds', 'output_seconds', 'input_audio_seconds'])
     if (u[key] !== undefined && u[key] !== null && seconds(u[key]) === null) return false;
@@ -99,6 +105,7 @@ export function parseUsage(raw: unknown): UsageMetrics {
   const m = emptyMetrics();
   m.inputTokens = count(u['input_tokens'] ?? u['prompt_tokens']); m.outputTokens = count(u['output_tokens'] ?? u['completion_tokens']);
   m.totalTokens = count(u['total_tokens']) ?? (m.inputTokens !== null && m.outputTokens !== null ? count(m.inputTokens + m.outputTokens) : null);
+  m.cacheWriteTokens = count(u['cache_creation_input_tokens']);
   m.cachedTokens = count(input['cached_tokens'] ?? u['cached_tokens']); m.reasoningTokens = count(output['reasoning_tokens'] ?? u['reasoning_tokens']);
   m.inputAudioTokens = count(input['audio_tokens']); m.outputAudioTokens = count(output['audio_tokens']);
   m.inputVideoSeconds = seconds(u['input_seconds']); m.outputVideoSeconds = seconds(u['output_seconds']);
@@ -109,11 +116,12 @@ function price(rate: UsageRate, m: UsageMetrics): number | null {
   let micros: number | null = null;
   if (rate.unit === 'tokens' && m.inputTokens !== null && m.outputTokens !== null) {
     const r = rate.longContext && m.inputTokens > rate.longContext.threshold ? rate.longContext : rate;
-    const cache = m.cachedTokens ?? 0;
+    const cache = m.cachedTokens ?? 0, written = m.cacheWriteTokens ?? 0;
+    if (written && rate.cacheWrite == null || cache + written > m.inputTokens) return null;
     // With a cache discount, absent cache telemetry is not evidence of zero cache use.
     if (m.inputTokens > 0 && m.cachedTokens === null && r.cached !== null && r.cached !== r.input) return null;
     if (cache > m.inputTokens || (m.reasoningTokens ?? 0) > m.outputTokens || (m.totalTokens !== null && m.totalTokens !== m.inputTokens + m.outputTokens)) return null;
-    if (r.input !== null && r.output !== null && (!cache || r.cached !== null)) micros = (m.inputTokens - cache) * r.input + cache * (r.cached ?? 0) + m.outputTokens * r.output;
+    if (r.input !== null && r.output !== null && (!cache || r.cached !== null)) micros = (m.inputTokens - cache - written) * r.input + cache * (r.cached ?? 0) + written * (rate.cacheWrite ?? 0) + m.outputTokens * r.output;
   } else if (rate.unit === 'seconds' && m.outputVideoSeconds !== null && rate.perSecond !== null) {
     if (rate.extraImage !== null && (m.inputVideoSeconds === null || m.inputImages === null)) return null;
     micros = ((m.outputVideoSeconds + (m.inputVideoSeconds ?? 0)) * rate.perSecond + Math.max(0, (m.inputImages ?? 0) - rate.freeImages) * (rate.extraImage ?? 0)) * 1e6;
@@ -125,7 +133,13 @@ export class UsageLedger {
   readonly store: Store;
   constructor(store: Store) { this.store = store; }
   begin(context: UsageContext & { provider: string; model: string; effectKey?: string; rate: UsageRate; estimatedMicros: number | null }, budget?: { day: string; limitUsd: number }, quota?: { day: string; limit: number }): UsageEntry {
+    context = { ...taskUsageContext.getStore(), ...context };
     return this.store.transaction(() => {
+      const campaign = context.runId ? this.store.get<import('./types.ts').CampaignRun>('runs', context.runId) : undefined;
+      context = { ...context, agentRole: context.agentRole ?? AGENT_ROLES[context.action],
+        ...(campaign?.agentRunId && !context.agentRunId ? { agentRunId: campaign.agentRunId } : {}),
+        ...(campaign?.experimentId && !context.experimentId ? { experimentId: campaign.experimentId } : {}) };
+      assertAiBudget(this.store, context, context.estimatedMicros);
       const id = randomUUID(), key = context.effectKey ?? id;
       if (context.effectKey && !this.store.startEffect(key)) throw new AppError('This paid request already has a recorded outcome. Reconcile it before resubmitting.');
       const entry: UsageEntry = { ...context, agentRole: context.agentRole ?? AGENT_ROLES[context.action], agentVersion: context.agentVersion ?? "workflow-v1", id, effectKey: key, chargeKey: budget ? `usage:${id}` : '', attempt: Number(this.store.db.prepare('SELECT COUNT(*) AS n FROM ai_usage WHERE effect_key=?').get(key)?.['n'] ?? 0) + 1,
@@ -192,7 +206,7 @@ export class UsageLedger {
   }
   query(params: URLSearchParams, exportAll = false) {
     const clauses: string[] = [], values: Array<string | number> = [];
-    for (const [param, column] of [['brand', 'brand_id'], ['provider', "json_extract(data,'$.provider')"], ['model', "json_extract(data,'$.model')"], ['action', "json_extract(data,'$.action')"], ['agent', "json_extract(data,'$.agentRole')"], ['status', "json_extract(data,'$.costStatus')"], ['run', "json_extract(data,'$.runId')"], ['creative', "json_extract(data,'$.creativeId')"]]) {
+    for (const [param, column] of [['brand', 'brand_id'], ['provider', "json_extract(data,'$.provider')"], ['model', "json_extract(data,'$.model')"], ['action', "json_extract(data,'$.action')"], ['agent', "json_extract(data,'$.agentRole')"], ['status', "json_extract(data,'$.costStatus')"], ['run', "json_extract(data,'$.runId')"], ['creative', "json_extract(data,'$.creativeId')"], ['agentRun', "json_extract(data,'$.agentRunId')"], ['experiment', "json_extract(data,'$.experimentId')"]]) {
       const value = params.get(param!); if (value) { if (value.length > 250) throw new AppError('Usage filter is too long.'); clauses.push(`${column}=?`); values.push(value); }
     }
     for (const date of ['from', 'to']) {

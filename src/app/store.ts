@@ -19,6 +19,7 @@ export class Store {
       .exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS documents(collection TEXT NOT NULL,id TEXT NOT NULL,brand_id TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(collection,id));
       CREATE INDEX IF NOT EXISTS documents_brand ON documents(collection,brand_id,updated_at);
+      CREATE INDEX IF NOT EXISTS documents_revision ON documents(collection,brand_id,json_extract(data,'$.externalId'),json_extract(data,'$.version')) WHERE collection IN ('businessOutcomes','costAdjustments');
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS secrets(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY,csrf TEXT NOT NULL,expires INTEGER NOT NULL);
@@ -37,6 +38,12 @@ export class Store {
       CREATE INDEX IF NOT EXISTS ai_usage_brand ON ai_usage(brand_id,created_at,id);
       CREATE INDEX IF NOT EXISTS ai_usage_effect ON ai_usage(effect_key);
       CREATE TABLE IF NOT EXISTS locks(name TEXT PRIMARY KEY,owner TEXT NOT NULL,until_ms INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS agent_models(id TEXT NOT NULL,version INTEGER NOT NULL,data TEXT NOT NULL,secret TEXT NOT NULL,PRIMARY KEY(id,version));
+      CREATE TABLE IF NOT EXISTS agent_runs(id TEXT PRIMARY KEY,brand_id TEXT NOT NULL,state TEXT NOT NULL,data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS agent_runs_brand ON agent_runs(brand_id,state);
+      CREATE TABLE IF NOT EXISTS agent_tasks(id TEXT PRIMARY KEY,run_id TEXT NOT NULL,brand_id TEXT NOT NULL,role TEXT NOT NULL,state TEXT NOT NULL,due INTEGER NOT NULL,lease TEXT NOT NULL DEFAULT '',lease_until INTEGER NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 0,data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS agent_tasks_ready ON agent_tasks(state,due,lease_until);
+      CREATE INDEX IF NOT EXISTS agent_tasks_run ON agent_tasks(run_id,state);
       PRAGMA optimize;`);
     migrateUsage(this);
   }

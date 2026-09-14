@@ -1,6 +1,6 @@
 # Agent Studio integration plan
 
-Status: proposed integration, with request-level cost accounting and agent attribution implemented in this change. The existing workflows still execute the work; a parallel multi-agent coordinator, arbitrary per-role model routing, experiments and net ROI reporting are not running yet.
+Status: the runtime is implemented. See [Agent Studio operation and contracts](AGENT-STUDIO.md) for the shipped behavior, evidence gates and verification boundary. The document below preserves the original design specification; aspirational items such as arbitrary tool-enabled/local model runtimes, automatically created randomized Meta splits and private inbox bots are not implied by the implementation. The current runtime supports public HTTPS provider adapters and the existing video/Meta executors.
 
 ## Product goal
 
@@ -190,7 +190,7 @@ Show low/base/high forecast scenarios with assumptions and uncertainty, plus rea
 | 3 — evidence and ROI | Immutable experiment assignments, cost allocation, FX snapshots, CRM outcomes, margin inputs and evaluation views | No duplicate revenue/cost; ROI unavailable when essential data is missing; forecast and realized results are distinguishable |
 | 4 — learning and bounded optimization | Evaluated playbook promotion, shadow-to-live role gates, budget proposals through existing controls | Improved outcomes are demonstrated against a baseline; rejected proposals and rollbacks are auditable; caps remain enforced outside the LLM |
 
-Next code boundary: add `src/agents/{contracts,registry,router,coordinator,memory,evaluation}.ts` with contract tests and one shadow workflow. Migrate current workflows incrementally instead of replacing all recovery and publishing logic at once. Preserve the current deterministic optimizer as the baseline and fallback throughout the rollout.
+Implementation: `src/agents/` now contains the provider registry/router, durable coordinator, shared memory, workflow forecasts, business economics and authenticated API. Contract and integration tests cover the operating boundaries above. The deterministic optimizer remains the baseline. Demonstrating improved business outcomes still requires a properly configured live comparison and mature evidence; software verification alone cannot establish that result.
 
 ## References used for the implemented video and metering contract
 
@@ -200,4 +200,4 @@ Next code boundary: add `src/agents/{contracts,registry,router,coordinator,memor
 - [MiniMax prompt caching](https://platform.minimax.io/docs/api-reference/text-prompt-caching)
 - [Z.AI model pricing](https://docs.z.ai/guides/overview/pricing)
 
-The agent orchestration, memory and evaluation design above is a proposed architecture for this repository. The provider links establish API/pricing details, not evidence that the proposed agent system will improve ROI.
+The design above records the original architecture. [The operations guide](AGENT-STUDIO.md) defines the implemented scope and remaining account checks. Provider documentation establishes API/pricing details; it is not evidence that the agent system will improve ROI.

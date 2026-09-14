@@ -15,6 +15,9 @@ import { readablePage, sourceUrl } from "../src/app/page-intelligence.ts";
 import type { PageKnowledge } from "../src/app/page-intelligence.ts";
 import { fixture } from "./support/mock-workspace.ts";
 import { EngagementServices } from "./support/engagement-services.ts";
+import { Registry } from "../src/agents/registry.ts";
+import { PageIntelligence } from "../src/app/page-intelligence.ts";
+import { landingText } from "./support/engagement-services.ts";
 
 const rule = { id: "care", label: "Care", questions: ["How do I clean it?"], reply: "Clean it gently by hand with a soft cloth." };
 function workspace() {
@@ -95,6 +98,26 @@ for(const fault of ["badEvidence","inventedLink","refuseReview","unavailableMode
 test("changed or stale landing-page knowledge invalidates an unsent AI reply",async()=>{const w=workspace();try{
   w.configure({aiEnabled:true});const c=await collect(w,"What is it made of?");for(const p of w.store.list<PageKnowledge>("pageKnowledge"))await w.engine.engagement.intelligence.refresh(p.id);await w.engine.engagement.draft(c.id);
   const p=w.store.list<PageKnowledge>("pageKnowledge").find(p=>p.url.endsWith("collection"))!;p.hash="changed";w.store.put("pageKnowledge",p);await w.engine.engagement.send(c.id);assert.equal(w.posts().length,0);assert.equal(w.comments().find(x=>x.id===c.id)!.status,"review");
+}finally{w.close();}});
+test("Studio role selections produce valid replies and a new reviewer version invalidates an unsent draft",async()=>{const w=workspace();try{
+  const registry=new Registry(w.store,w.vault);
+  const input={id:"reply-checker",name:"Reply checker",provider:"custom",adapter:"chat",endpoint:"https://api.z.ai/api/paas/v4",model:"owner-chosen",capabilities:["text","json"],apiKey:"isolated-test-key",rates:{input:1,output:2},jsonMode:"prompt"};
+  registry.verify(registry.saveModel(input));
+  registry.saveConfig("nord",{bindings:{"community-manager":{modelId:"builtin-minimax-m2.7"},"response-reviewer":{modelId:"reply-checker"}}});
+  w.configure({aiEnabled:true});const c=await collect(w,"What is it made of?");
+  for(const p of w.store.list<PageKnowledge>("pageKnowledge"))await w.engine.engagement.intelligence.refresh(p.id);
+  await w.engine.engagement.draft(c.id);const draft=w.comments().find(x=>x.id===c.id)!;
+  assert.equal(draft.status,"queued");assert.equal(draft.ai!.provider,"minimax");assert.equal(draft.ai!.reviewConfigVersion,"reply-checker@1");
+  assert.equal(w.engine.engagement.intelligence.validDraft(fixture(),w.threads().find(t=>t.id===c.threadId)!,draft.ai!),true);
+  registry.verify(registry.saveModel({...input,model:"updated-reviewer"}));
+  await w.engine.engagement.send(c.id);assert.equal(w.posts().length,0);assert.equal(w.comments().find(x=>x.id===c.id)!.status,"review");
+}finally{w.close();}});
+test("optional rendered-page contract supplies content and rejects a mismatched destination",async()=>{const w=workspace();try{
+  w.configure({aiEnabled:true});w.service.shortPage=true;w.store.setSetting("pageRendererEndpoint","https://renderer.example/render");let wrong=false;
+  const intelligence=new PageIntelligence(w.store,w.vault,async(input,init)=>String(input).includes("renderer.example")?Response.json({requestedUrl:wrong?"https://other.example/":JSON.parse(String(init?.body)).url,finalUrl:"https://nord.example/collection",title:"Rendered product",text:landingText}):w.service.fetch(input,init),w.service.page);
+  const id=intelligence.enqueue("nord","https://nord.example/collection");await intelligence.refresh(id);
+  assert.equal(w.store.get<PageKnowledge>("pageKnowledge",id)!.text,landingText);assert.equal(w.store.get<PageKnowledge>("pageKnowledge",id)!.error,"");
+  wrong=true;await assert.rejects(intelligence.refresh(id),/requested page contract/);assert.ok(w.store.get<PageKnowledge>("pageKnowledge",id)!.error);
 }finally{w.close();}});
 test("AI request allowance persists and never falls through to an unconfigured provider",async()=>{const w=workspace();try{
   w.configure({aiEnabled:true,aiDailyLimit:1});await w.engine.engagement.discover("nord");const p=w.store.list<PageKnowledge>("pageKnowledge")[0]!;await w.engine.engagement.intelligence.refresh(p.id);

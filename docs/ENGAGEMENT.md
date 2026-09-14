@@ -74,3 +74,8 @@ Owner-authenticated, CSRF-protected mutations:
 
 
 Page profiling, drafts and reply verification now appear individually in **Usage & costs**, including provider token/cache details and USD estimates/calculations. The per-brand daily AI request limit is unchanged; engagement costs are reported separately from the production allowance. See [usage accounting](USAGE-AND-COSTS.md) and the [Agent Studio plan](AGENT-STUDIO-PLAN.md).
+
+
+## Agent Studio integration
+
+The brand researcher, community manager and response reviewer may use the models selected for their roles in Agent Studio. If no explicit role model is selected, the brand's existing MiniMax/GLM configuration remains in effect. Custom model versions require a connection test. Drafts retain their generating and reviewing configuration versions, and a change invalidates a queued draft. Request quotas and configured studio USD allowances both apply. An optional public page-rendering service is documented in [Agent Studio](AGENT-STUDIO.md#public-pages-rendered-with-javascript); no private-page sign-in or private-message inbox is included.

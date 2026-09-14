@@ -61,19 +61,22 @@ export class MockServices {
     if (failure) return failure;
     if (url.hostname === "api.openai.com") {
       if (path.startsWith("/v1/models")) return Response.json({data:[{id:"gpt-4.1-mini"}]});
-      if (path === "/v1/audio/speech") return new Response(this.mediaDir ? new Uint8Array(readFileSync(join(this.mediaDir,"voice.mp3"))) : new Uint8Array([1,2,3]));
+      if (path === "/v1/audio/speech") return new Response(this.mediaDir ? new Uint8Array(readFileSync(join(this.mediaDir,"voice.mp3"))) : new Uint8Array(128).fill(1), {headers:{"content-type":"audio/mpeg"}});
       if (path === "/v1/responses") {
         const payload = body as {instructions:string;input:Array<{content:Array<{text?:string}>}>};
         const context = JSON.parse(payload.input[0]!.content[0]!.text!);
+        const format = (body as {text?:{format?:{schema?:{properties?:Record<string,unknown>}}}}).text?.format?.schema;
+        const properties = format?.properties ?? {};
         const visual = payload.instructions.startsWith("Review this contact sheet");
-        const value = visual
+        const agent = properties["summary"] ? {summary:"Use truthful product details and compare mature business outcomes.", ...(properties["approved"] ? {approved:true,findings:[]} : properties["action"] ? {action:"allow-scale"} : {recommendations:["Test a distinct, substantiated creative hook."]}),sourceIds:[],confidence:0.9} : properties["verified"] ? {verified:true} : null;
+        const value = agent ?? (visual
           ? (this.visualFailures-- > 0 ? {verdict:"BLOCK", findings:["Mock unreadable headline"]} : {verdict:"PASS",findings:["Mock reviewer approved the fixture."]})
           : {creatives:Array.from({length:Number(context.count)},(_,i)=>({
               angle:i ? "A quieter everyday" : "Objects with intention", headline:i ? "A quieter everyday" : "Objects with intention",
               copy: approved.slice(0,240), voiceover:approved, onScreenText:"Considered objects for everyday living",
               template:i%2 ? "listicle" : "problem_solution_demo",
               shots:["A ceramic vessel on a warm stone surface. Slow camera movement.","A close view of the ceramic form in soft daylight. Slow camera movement."],
-            }))};
+            }))});
         return Response.json({status:"completed",output:[{content:[{type:"output_text",text:JSON.stringify(value)}]}],usage:{input_tokens:900,output_tokens:250,input_tokens_details:{cached_tokens:200}}});
       }
     }

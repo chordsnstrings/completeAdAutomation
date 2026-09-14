@@ -25,13 +25,13 @@ const services=new MockServices();services.mediaDir=resolve(process.argv[2]??"..
 const engagementServices=new EngagementServices(), workflowFetch=services.fetch;
 services.fetch=async(input,init)=>{
   const url=new URL(String(input)),path=url.pathname.replace(/^\/v\d+\.\d+\//,"");
-  if(["me/adaccounts","me/accounts","me/assigned_pages","me/businesses"].includes(path)||/adspixels$|instagram_accounts$|leadgen_forms$|advertisable_applications$/.test(path)||/\/(comments|replies|subscribed_apps)$/.test(path)||engagementServices.nodes.has(path)||(path==="act_123456/ads"&&url.searchParams.get("fields")?.includes("effective_object_story_id")))return engagementServices.fetch(input,init);
+  if(url.hostname === "api.z.ai" || url.hostname === "api.minimax.io" && path.startsWith("/v1/") || ["me/adaccounts","me/accounts","me/assigned_pages","me/businesses"].includes(path)||/adspixels$|instagram_accounts$|leadgen_forms$|advertisable_applications$/.test(path)||/\/(comments|replies|subscribed_apps)$/.test(path)||engagementServices.nodes.has(path)||(path==="act_123456/ads"&&url.searchParams.get("fields")?.includes("effective_object_story_id")))return engagementServices.fetch(input,init);
   return workflowFetch(input,init);
 };
 const origin="http://terminal.local:4173";
 const app=createApp({dataDir:dir,uiDir:resolve("ui"),origin,startWorker:false,
   oauthFetchImpl:engagementServices.oauth.fetch,
-  engineFactory:(s,v)=>new Engine(s,v,{meta:new MockMeta(s,v,services),production:new MockProduction(s,v,services),fetchImpl:engagementServices.fetch,pageTransport:engagementServices.page})});
+  engineFactory:(s,v)=>new Engine(s,v,{meta:new MockMeta(s,v,services),production:new MockProduction(s,v,services),fetchImpl:services.fetch,pageTransport:engagementServices.page})});
 await new Promise<void>(resolve=>app.server.listen(0,"127.0.0.1",resolve));
 const upstream=`http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
 let cookie="",csrf="";const password=randomBytes(32).toString("base64url");
@@ -58,6 +58,13 @@ console.log(JSON.stringify({ready:true,origin,isolated:true,worker:false}));
 let current="";
 async function command(input:Record<string,unknown>) {
   const action=String(input["action"]);
+  if(action==="studio") {
+    await command({action:"prepare"});
+    app.engine.agents.router.registry.saveConfig("nord", {mode:"review",maxRunUsd:25,dailyUsd:100,concurrency:3});
+    app.engine.agents.memory.append("nord",{title:"Product language",content:"Use the approved ceramic product details, simple forms and quiet palette. Avoid unsupported performance claims.",kind:"approved"});
+    app.engine.agents.start();
+    console.log(JSON.stringify({action,ok:true}));return;
+  }
   if(action==="auth-view"){cookie="";console.log(JSON.stringify({action,ok:true}));return;}
   if(action==="facebook"){
     app.vault.set("metaAppId","1234567890");app.vault.set("metaAppSecret","test-only-app-secret-12345");app.vault.set("metaLoginConfigId","9876543210");app.vault.set("metaUserToken","test-user-credential");app.vault.set("glmKey","test-glm-credential");app.vault.set("minimaxKey","test-minimax-credential");app.vault.set("metaWebhookVerifyToken","test-only-verification-token");

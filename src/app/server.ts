@@ -7,6 +7,8 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { Store } from "./store.ts";
+import { studioApi } from "../agents/api.ts";
+import { Economics } from "../agents/economics.ts";
 import { UsageLedger, defaultChatRates, chatRate, tokenRate } from "./usage.ts";
 import {
   Vault,
@@ -368,8 +370,15 @@ export function createApp(options: AppOptions) {
       json(res, { accepted: true, event_id: payload["event_id"] }, 202);
       return;
     }
+    if (path === "/api/webhooks/outcomes" && method === "POST") {
+      const token = vault.get("conversionWebhookToken");
+      if (!token || !equal(String(req.headers.authorization ?? ""), `Bearer ${token}`)) { throttle(req); throw new AppError("Unauthorized webhook.", 401); }
+      const payload = object(await body(req));
+      json(res, new Economics(store).recordOutcome(string(payload["brandId"], "Brand ID", 100, true), payload), 202); return;
+    }
     if (path.startsWith("/api/")) {
       const s = auth(req, !["GET", "HEAD"].includes(method));
+      if (path.startsWith("/api/studio")) { const result = await studioApi(engine, method, url, () => body(req)); if (result) { json(res, result.data, result.status); return; } }
       if (path === "/api/usage" && method === "GET") {
         json(res, new UsageLedger(store).query(url.searchParams)); return;
       }
@@ -694,9 +703,9 @@ export function createApp(options: AppOptions) {
         if (!action && method === "DELETE") {
           if (brand.autonomy || hasWork(brand.id))
             throw new AppError("Pause this brand before archiving it.", 409);
-          if (store.list("runs", brand.id).length)
+          if (store.list("runs", brand.id).length || engine.agents.runs(brand.id).length || new UsageLedger(store).query(new URLSearchParams({brand:brand.id})).entries.length)
             throw new AppError(
-              "Brands with campaign history are retained for reporting. You can leave this brand paused.",
+              "Brands with campaign or AI history are retained for reporting. You can leave this brand paused.",
             );
           store.remove("brands", brand.id);
           for (const collection of ["engagement", "commentThreads", "comments", "pageKnowledge"] as const) for (const item of store.list<{ id: string }>(collection, brand.id)) store.remove(collection, item.id);
@@ -892,7 +901,7 @@ export function createApp(options: AppOptions) {
     }
     if (
       ["GET", "HEAD"].includes(method) &&
-      ["/", "/app.html", "/app.js", "/public.js", "/app.css", "/mark.svg"].includes(path)
+      ["/", "/app.html", "/app.js", "/studio.js", "/public.js", "/app.css", "/mark.svg"].includes(path)
     ) {
       serveFile(
         req,

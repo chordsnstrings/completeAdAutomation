@@ -41,6 +41,7 @@ import { MetaGateway } from "./meta.ts";
 import { Engagement } from "./engagement.ts";
 import type { EngagementConfig } from "./engagement.ts";
 import { Production } from "./production.ts";
+import { AgentCoordinator } from "../agents/coordinator.ts";
 import type { publicBytes } from "./network.ts";
 import { planFor } from "./planner.ts";
 import { AppError, TransientAppError, DEFAULT_SETTINGS, nowIso } from "./types.ts";
@@ -91,6 +92,7 @@ export class Engine {
   readonly meta: MetaGateway;
   readonly production: Production;
   readonly engagement: Engagement;
+  readonly agents: AgentCoordinator;
   private readonly webhookTransport: typeof publicBytes | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private busy = false;
@@ -104,6 +106,7 @@ export class Engine {
       options.meta ?? new MetaGateway(store, vault, options.fetchImpl);
     this.production =
       options.production ?? new Production(store, vault, options.fetchImpl);
+    this.agents = new AgentCoordinator(store, vault, this.production, options.fetchImpl ?? this.production.router.fetchImpl);
     this.engagement = new Engagement(store, vault, this.meta, options.fetchImpl, options.pageTransport);
   }
   settings(): Settings {
@@ -116,6 +119,7 @@ export class Engine {
   }
   start(): void {
     this.stopped = false;
+    this.agents.start();
     const loop = async () => {
       if (this.stopped) return;
       try {
@@ -130,10 +134,12 @@ export class Engine {
   }
   stop(): void {
     this.stopped = true;
+    this.agents.stop();
     if (this.timer) clearTimeout(this.timer);
   }
   async drain(): Promise<void> {
     while (this.busy) await new Promise((resolve) => setTimeout(resolve, 50));
+    await this.agents.drain();
   }
   createRun(brandId: string, replacementFor = ""): CampaignRun {
     const brand = this.brand(brandId);
@@ -174,6 +180,7 @@ export class Engine {
       stages: [],
       generationCostUsd: 0,
       replacementFor: replacementFor || active?.id || "",
+      agentConfig: this.agents.router.registry.freeze(brandId),
     };
     this.store.transaction(() => {
       this.store.put("runs", run);
@@ -202,6 +209,7 @@ export class Engine {
       if (settings.globalPaused) return;
       for (const c of this.store.list<EngagementConfig>("engagement")) if (c.mode !== "off") this.store.enqueue("engagement-discover", c.brandId, Date.now(), false);
       for (const brand of this.store.list<ManagedBrand>("brands")) {
+        if (brand.autonomy) this.agents.scheduleAnalysis(brand.id);
         if (brand.autonomy)
           this.store.enqueue("monitor", brand.id, Date.now(), false);
         if (brand.mode === "LIVE" && brand.destination.leadFormId) {
@@ -280,6 +288,7 @@ export class Engine {
             ...(stoppedRun.correctionFeedback ?? []),
             message,
           ];
+          if (stoppedRun.agentRunId) { this.agents.cancel(stoppedRun.agentRunId); delete stoppedRun.agentRunId; }
           stoppedRun.creativeIds = [];
           stoppedRun.phase = "copy";
           stoppedRun.status = "waiting";
@@ -369,6 +378,7 @@ export class Engine {
       );
     if (run.mode === "LIVE" && !brand.autonomy)
       throw new AppError("Live autonomy is paused for this brand.");
+    run.agentConfig ??= this.agents.router.registry.freeze(run.brandId);
     run.status = "running";
     run.error = "";
     run.updatedAt = nowIso();
@@ -397,10 +407,10 @@ export class Engine {
           );
         if (!simulation) {
           const connections = this.vault.status();
-          if (!connections["openaiKey"])
-            throw new AppError(
-              "Connect OpenAI for scripts, narration and visual review.",
-            );
+          for (const role of ["copywriter", "voice-producer", "creative-reviewer"] as const) {
+            const model = this.agents.router.registry.forCampaign(role, brand.id, run.id).model;
+            if (!model.verifiedAt || !this.agents.router.registry.credential(model)) throw new AppError(`Connect and verify the ${role} model in Agent Studio or Connections.`);
+          }
           const provider = this.settings().provider;
           if (provider === "minimax" && !connections["minimaxKey"])
             throw new AppError("Connect a MiniMax pay-as-you-go API key for H3 video generation.");
@@ -414,6 +424,18 @@ export class Engine {
         break;
       }
       case "copy": {
+        const mode = run.agentConfig?.config.mode ?? this.agents.router.registry.config(brand.id).mode;
+        if (!simulation && ["review", "auto"].includes(mode)) {
+          const agentRun = run.agentRunId ? this.agents.get(run.agentRunId) : this.agents.create(brand.id, run);
+          if (!agentRun) throw new AppError("Agent production record is missing.");
+          if (["failed", "cancelled", "uncertain"].includes(agentRun.state)) throw new AppError(agentRun.error || "Agent production stopped. Review Agent Studio.");
+          if (agentRun.state !== "complete") { wait = 3000; break; }
+          run.creativeIds = this.store.get<CampaignRun>("runs", run.id)!.creativeIds;
+          run.agentBrief = this.store.get<CampaignRun>("runs", run.id)!.agentBrief;
+          run.phase = "screen";
+          break;
+        }
+        if (!simulation && mode === "shadow" && !this.agents.runs(brand.id).some(r => !r.campaignRunId && ["queued", "running"].includes(r.state))) this.agents.create(brand.id);
         if (!run.creativeIds.length)
           run.creativeIds = (await this.production.draft(brand, run)).map(
             (c) => c.id,
@@ -1102,6 +1124,7 @@ export class Engine {
     this.store.event(brand.id, "info", "Campaign paused", run.id.slice(0, 8));
   }
   async pauseBrand(id: string): Promise<void> {
+    this.agents.cancelBrand(id);
     const brand = this.brand(id);
     brand.autonomy = false;
     this.store.put("brands", brand);
@@ -1513,7 +1536,8 @@ export class Engine {
           await this.meta.status(d.adId, "PAUSED", brand);
           decision.applied = true;
         }
-        if (run.mode === "LIVE" && d.verdict === "SCALE") {
+        if (run.mode === "LIVE" && d.verdict === "SCALE" && !this.agents.scaleAllowed(brand.id)) decision.reason += " Budget held: a current agent budget assessment has not approved scaling.";
+        if (run.mode === "LIVE" && d.verdict === "SCALE" && this.agents.scaleAllowed(brand.id)) {
           const settled = metrics.filter(
             (m) =>
               m.adId === d.adId &&

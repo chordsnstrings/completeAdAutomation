@@ -331,7 +331,8 @@ export class Engagement {
     if (!t || !this.config(b.id).aiEnabled || sensitive.test(c.text) || privateData.test(c.text)) return;
     const ai = await this.intelligence.draft(b, t, c);
     const current = this.store.get<AdComment>("comments", id), config = this.ready(b.id).config;
-    if (!current || current.status !== "review" || current.text !== c.text || current.approved || !config.aiEnabled || config.model !== ai.model || config.provider !== ai.provider) return;
+    const currentThread = this.store.get<CommentThread>("commentThreads", t.id);
+    if (!current || !currentThread || current.status !== "review" || current.text !== c.text || current.approved || !config.aiEnabled || !this.intelligence.validDraft(b, currentThread, ai)) return;
     current.ai = ai; current.reply = ai.reply; current.approvedText = c.text; current.reason = `Grounded draft from ${ai.model}.`;
     if (config.mode === "auto" && current.createdAt && current.createdAt >= config.autoSince && b.mode === "LIVE") current.status = "queued";
     this.store.put("comments", current); if (current.status === "queued") this.store.enqueue("comment-reply", id);

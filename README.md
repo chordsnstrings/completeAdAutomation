@@ -77,7 +77,9 @@ See [the engagement setup and behavior](docs/ENGAGEMENT.md) for permissions, sup
 
 **Usage & costs** shows every paid production and engagement request, with token details, video seconds, per-request cost estimates/receipts, model/activity/agent-role breakdowns, campaign/creative attribution and CSV export. H3 video is **$1.28 for two 8-second shots** at the default 768P rate; copy, narration and review are additional. See [usage and cost accounting](docs/USAGE-AND-COSTS.md).
 
-The [Agent Studio integration plan](docs/AGENT-STUDIO-PLAN.md) specifies a provider-agnostic creative team, per-role model choices (including MiniMax and GLM), parallel work, shared brand learning, predicted costs and eventual ROI evaluation. This update supplies its metering and role-attribution foundation; the proposed multi-agent coordinator and ROI evaluation are not deployed yet.
+[Agent Studio](docs/AGENT-STUDIO.md) implements per-role model choices (including MiniMax and GLM), supported provider adapters, encrypted/versioned model connections, durable parallel tasks, approval gates, shared brand memory and atomic USD allowances. Research and performance analysis inform the creative brief; video and narration run in parallel after script approval. Existing Meta publishing and spending safeguards remain in control. Coordination defaults to off until configured.
+
+**Experiments & ROI** adds workflow cost quotes, explicit low/base/high planning scenarios, confirmed order/CRM outcomes with refund revisions, invoice/operating-cost reconciliation, dated currency conversion, fixed campaign comparisons and evidence-gated playbook learning. Final net marketing ROI remains unavailable until attribution, source coverage and costs are complete. See [production activation](docs/PRODUCTION-ACTIVATION.md) for live-account checks and the browser-review boundary.
 
 ## Spending and recovery
 
@@ -129,7 +131,8 @@ The tests include the original domain/API suites plus HTTP authentication and CS
 | `ui/`                                                                       | Responsive application, owner login, brand editing, reporting, campaign progress, creative inspection, funnel comparison, connections |
 | `src/app/server.ts`                                                         | Authenticated HTTP API, setup, sessions, CSRF, static/media serving, exports and conversion intake                                    |
 | `src/app/engine.ts`                                                         | Persistent pipeline, publishing, activation, monitoring, optimization, repair and emergency pause                                     |
-| `src/app/production.ts`                                                     | Structured scripts, Seedance/Veo tasks, speech, FFmpeg assembly, technical and visual review                                          |
+| `src/agents/` | Model registry/adapters, concurrent coordinator, memory, forecasts, experiments, ROI and authenticated Studio API |
+| `src/app/production.ts`                                                     | Role-selected scripts/reviews/narration, H3/Seedance/Veo tasks, speech, FFmpeg assembly, technical and visual review                                          |
 | `src/app/store.ts`, `security.ts`                                           | SQLite documents/jobs/effects/reservations and AES-GCM credential encryption                                                          |
 | `src/app/meta.ts`, `network.ts`, `webhooks.ts`                              | Scoped Meta operations, reconciliation, public-URL checks and signed delivery                                                         |
 | `src/meta/`, `src/funnel/`, `src/autonomy/`, `src/policy/`, `src/assembly/` | Existing typed, tested domain and integration libraries                                                                               |
