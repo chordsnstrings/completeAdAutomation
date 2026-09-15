@@ -33,6 +33,63 @@ function bucHeader(entries: Array<Record<string, unknown>>, objectId = '1234'): 
   return JSON.stringify({ [objectId]: entries });
 }
 
+test('points: upgrading to the Full tier carries the bucket fraction, not the raw count', async () => {
+  // A brand-new account is seeded at the Limited ceiling because no header has arrived
+  // yet. The first response then reports standard_access and the ceiling becomes 9000.
+  // Carrying the raw token count across that change leaves the account at ~60 of 9000,
+  // under a read reserve of 4500 — so a healthy, idle Full-tier account refuses every
+  // read for ~147s on nothing but its own bookkeeping.
+  const clock = fakeClock();
+  const s = new MetaScheduler({ now: clock.now });
+  const full = headers({
+    'x-business-use-case-usage': bucHeader([
+      { type: 'ads_management', call_count: 12, ads_api_access_tier: 'standard_access' },
+    ]),
+  });
+
+  await s.run({ lane: 'READ', adAccountId: 'act_1', headers: () => undefined }, async () => 'ok');
+  assert.equal(s.snapshot('act_1').capacity, POINT_CEILING.LIMITED);
+
+  s.observe('act_1', full);
+  const after = s.snapshot('act_1');
+  assert.equal(after.capacity, POINT_CEILING.FULL);
+  // 59 of 60 was ~98% of the bucket; it must still be ~98% of 9000, not 59 of 9000.
+  assert.ok(
+    after.tokens > POINT_CEILING.FULL * 0.9,
+    `expected the bucket to stay proportionally full, got ${after.tokens} of ${after.capacity}`,
+  );
+
+  // The read that used to be refused must now go through.
+  clock.advance(1000);
+  assert.equal(
+    await s.run({ lane: 'READ', adAccountId: 'act_1', headers: () => full }, async () => 'ok'),
+    'ok',
+  );
+});
+
+test('points: a downgrade still clamps the bucket to the smaller ceiling', async () => {
+  const clock = fakeClock();
+  const s = new MetaScheduler({ now: clock.now });
+  s.observe('act_1', headers({
+    'x-business-use-case-usage': bucHeader([
+      { type: 'ads_management', call_count: 1, ads_api_access_tier: 'standard_access' },
+    ]),
+  }));
+  assert.equal(s.snapshot('act_1').capacity, POINT_CEILING.FULL);
+
+  s.observe('act_1', headers({
+    'x-business-use-case-usage': bucHeader([
+      { type: 'ads_management', call_count: 1, ads_api_access_tier: 'development_access' },
+    ]),
+  }));
+  const after = s.snapshot('act_1');
+  assert.equal(after.capacity, POINT_CEILING.LIMITED);
+  assert.ok(
+    after.tokens <= POINT_CEILING.LIMITED,
+    `a downgrade must never leave more tokens than the ceiling, got ${after.tokens}`,
+  );
+});
+
 const NEVER_CALLED = async (): Promise<never> => {
   throw new Error('the scheduler must not invoke the call when it is throttled');
 };

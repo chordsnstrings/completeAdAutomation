@@ -328,10 +328,22 @@ export class MetaScheduler {
     if (observedTier !== undefined) st.fullTier = observedTier === 'FULL';
     const capacity = st.fullTier ? POINT_CEILING.FULL : POINT_CEILING.LIMITED;
     if (capacity !== st.capacity) {
+      const previous = st.capacity;
       st.capacity = capacity;
-      // On a downgrade, clamp. On an upgrade, let the normal refill earn the new headroom
-      // rather than granting 9000 points on the strength of one header.
-      st.tokens = Math.min(st.tokens, capacity);
+      // On a downgrade, clamp. On an upgrade, carry the FRACTION of the bucket across
+      // rather than the absolute count: the count was earned against the old ceiling and
+      // means something different against the new one. Keeping it verbatim is what left a
+      // brand-new Full-tier account at 60 tokens of 9000 — under a read reserve of 4500 —
+      // so its first response refused every subsequent read for ~147 seconds while the
+      // refill crawled past the reserve line. The account was idle and healthy; only the
+      // bookkeeping said otherwise. The header clamp immediately below still applies
+      // Meta's own pessimistic view, so this can only restore headroom we already had.
+      st.tokens =
+        capacity > previous
+          ? previous > 0
+            ? (st.tokens / previous) * capacity
+            : capacity
+          : Math.min(st.tokens, capacity);
     }
 
     const acct = state.adAccount;
